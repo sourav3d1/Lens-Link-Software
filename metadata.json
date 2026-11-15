@@ -1,0 +1,6 @@
+{
+  "name": "LensLink",
+  "description": "Lightweight wireless smartphone-to-PC webcam application using local WebRTC signaling, QR pairing, and Windows virtual camera integration.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": []
+}
