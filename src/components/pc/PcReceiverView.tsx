@@ -33,6 +33,29 @@ import {
   isLocalLanHostname,
 } from '../../lib/webrtc';
 import { VirtualCamPanel } from '../vcam/VirtualCamPanel';
+import { QrCodeDisplay } from '../common/QrCodeDisplay';
+
+const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+
+function generateLocalPairingCode(): string {
+  let code = '';
+  for (let i = 0; i < 6; i++) {
+    code += CODE_ALPHABET[Math.floor(Math.random() * CODE_ALPHABET.length)];
+  }
+  return code;
+}
+
+function getOrCreateInitialCode(): string {
+  try {
+    const saved = sessionStorage.getItem('lenslink_pc_code') || '';
+    if (/^[A-Z0-9]{6}$/.test(saved)) return saved;
+    const fresh = generateLocalPairingCode();
+    sessionStorage.setItem('lenslink_pc_code', fresh);
+    return fresh;
+  } catch {
+    return generateLocalPairingCode();
+  }
+}
 
 type ActiveTab = 'receiver' | 'virtual-cam' | 'guide';
 
@@ -42,7 +65,7 @@ interface PcReceiverViewProps {
 
 export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
   const [activeTab, setActiveTab] = useState<ActiveTab>('receiver');
-  const [pairCode, setPairCode] = useState<string>('');
+  const [pairCode, setPairCode] = useState<string>(getOrCreateInitialCode);
   const [networkInfo, setNetworkInfo] = useState<NetworkInfoResponse | null>(null);
   const [selectedOrigin, setSelectedOrigin] = useState<string>(window.location.origin);
 
@@ -80,11 +103,13 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
   const vcamPeersRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const prevStatsRef = useRef<{ bytes: number; timestamp: number } | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
-  const pairCodeRef = useRef<string>('');
+  const pairCodeRef = useRef<string>(pairCode);
+  const phoneOnlineRef = useRef<boolean>(phoneOnline);
   const localOnlyIceRef = useRef<boolean>(localOnlyIce);
   const settingsRef = useRef<CameraSettings>(settings);
 
   pairCodeRef.current = pairCode;
+  phoneOnlineRef.current = phoneOnline;
   localOnlyIceRef.current = localOnlyIce;
   settingsRef.current = settings;
 
@@ -191,8 +216,6 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
     let disposed = false;
     let attempt = 0;
 
-    const savedCode = sessionStorage.getItem('lenslink_pc_code') || '';
-
     const connect = () => {
       if (disposed) return;
       const ws = new WebSocket(getWsUrl());
@@ -201,10 +224,10 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
       ws.onopen = () => {
         if (disposed) return;
         attempt = 0;
-        const codeToUse = pairCodeRef.current || savedCode;
+        const codeToUse = pairCodeRef.current || getOrCreateInitialCode();
         sendWs({
           type: 'room:create',
-          code: codeToUse || undefined,
+          code: codeToUse,
         });
       };
 
@@ -264,7 +287,7 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
           if (!active) {
             closePhonePeer();
             closeVcamWebPeers();
-            setConnectionStatus(phoneOnline ? 'waiting' : 'disconnected');
+            setConnectionStatus(phoneOnlineRef.current ? 'waiting' : 'disconnected');
           }
           return;
         }
@@ -382,7 +405,7 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
       closePhonePeer();
       closeVcamWebPeers();
     };
-  }, [closePhonePeer, closeVcamWebPeers, phoneOnline, sendWs]);
+  }, [closePhonePeer, closeVcamWebPeers, sendWs]);
 
   // Periodically collect real WebRTC stats while connected
   useEffect(() => {
@@ -500,9 +523,15 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
     setPhoneStreaming(false);
     setCapabilities(null);
     setConnectionStatus('waiting');
-    sessionStorage.removeItem('lenslink_pc_code');
-    pairCodeRef.current = '';
-    sendWs({ type: 'room:create' });
+    const nextCode = generateLocalPairingCode();
+    setPairCode(nextCode);
+    pairCodeRef.current = nextCode;
+    try {
+      sessionStorage.setItem('lenslink_pc_code', nextCode);
+    } catch {
+      // Ignore storage failures
+    }
+    sendWs({ type: 'room:create', code: nextCode });
   };
 
   const updateRemoteSetting = (patch: Partial<CameraSettings>) => {
@@ -511,7 +540,6 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
   };
 
   const pairingUrl = pairCode ? `${selectedOrigin}/?mode=phone&pair=${pairCode}` : '';
-  const qrImgSrc = pairingUrl ? `/api/qr?text=${encodeURIComponent(pairingUrl)}` : '';
 
   const handleCopyCode = async () => {
     if (!pairCode) return;
@@ -666,7 +694,11 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
               <div className="space-y-4">
                 <div
                   ref={videoContainerRef}
-                  className="relative aspect-video w-full rounded-xl bg-slate-950 border border-slate-200 overflow-hidden flex items-center justify-center"
+                  className={`relative w-full rounded-xl bg-slate-950 border border-slate-200 flex items-center justify-center ${
+                    hasVideoTrack
+                      ? 'aspect-video overflow-hidden'
+                      : 'min-h-[380px] lg:min-h-[480px]'
+                  }`}
                 >
                   <video
                     ref={videoRef}
@@ -684,17 +716,13 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
 
                   {/* Pairing / Waiting State */}
                   {!hasVideoTrack && (
-                    <div className="w-full h-full p-6 sm:p-10 flex flex-col md:flex-row items-center justify-center gap-8 md:gap-12 bg-slate-950 text-white">
-                      <div className="bg-white p-3.5 rounded-xl shrink-0">
-                        {qrImgSrc ? (
-                          <img
-                            src={qrImgSrc}
-                            alt={`QR code for pairing code ${pairCode}`}
-                            className="w-44 h-44 sm:w-48 sm:h-48 block"
-                          />
-                        ) : (
-                          <div className="w-44 h-44 sm:w-48 sm:h-48 bg-slate-100 rounded-lg animate-pulse" />
-                        )}
+                    <div className="w-full h-full p-6 sm:p-8 flex flex-col md:flex-row items-center justify-center gap-6 md:gap-10 bg-slate-950 text-white">
+                      <div className="bg-white p-3 rounded-xl shrink-0 shadow-sm">
+                        <QrCodeDisplay
+                          value={pairingUrl}
+                          size={184}
+                          alt={`QR code for pairing code ${pairCode}`}
+                        />
                       </div>
 
                       <div className="max-w-sm space-y-4 text-center md:text-left">
