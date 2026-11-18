@@ -435,6 +435,58 @@ async function startServer() {
     res.send(zipBuffer);
   });
 
+  app.get('/api/android-app/bundle', (req, res) => {
+    const androidDir = path.join(__dirname, 'android-app');
+    if (!fs.existsSync(androidDir)) {
+      res.status(404).json({ error: 'Android app project files not found' });
+      return;
+    }
+
+    const rawOrigin = typeof req.query.origin === 'string' ? req.query.origin.trim() : '';
+    let appOrigin = rawOrigin;
+    if (!/^https?:\/\/[^/]+$/i.test(appOrigin)) {
+      const proto = req.headers['x-forwarded-proto'] === 'https' || req.secure ? 'https' : 'http';
+      appOrigin = `${proto}://${req.headers.host || `localhost:${PORT}`}`;
+    }
+
+    const files: Array<{ name: string; content: Buffer }> = [];
+    const walk = (dirPath: string, relPrefix: string) => {
+      for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
+        const full = path.join(dirPath, entry.name);
+        const rel = relPrefix ? `${relPrefix}/${entry.name}` : entry.name;
+        if (entry.isDirectory()) {
+          if (entry.name === '.gradle' || entry.name === 'build' || entry.name === '.idea') continue;
+          walk(full, rel);
+        } else if (entry.isFile()) {
+          let content = fs.readFileSync(full);
+          if (rel === 'app/src/main/res/values/strings.xml') {
+            const xmlEscapedOrigin = appOrigin.replace(/&/g, '&amp;');
+            content = Buffer.from(
+              content.toString('utf8').replace('http://192.168.1.100:3000', xmlEscapedOrigin),
+              'utf8'
+            );
+          }
+          files.push({
+            name: `LensLink-Android/${rel}`,
+            content,
+          });
+        }
+      }
+    };
+
+    walk(androidDir, '');
+
+    if (files.length === 0) {
+      res.status(404).json({ error: 'Android app project is empty' });
+      return;
+    }
+
+    const zipBuffer = buildZipBuffer(files);
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', 'attachment; filename="lenslink-android-studio.zip"');
+    res.send(zipBuffer);
+  });
+
   const server = http.createServer(app);
   const wss = new WebSocketServer({ noServer: true });
 

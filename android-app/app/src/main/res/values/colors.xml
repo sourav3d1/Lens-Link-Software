@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg_slate_950">#020617</color>
+    <color name="surface_slate_900">#0F172A</color>
+    <color name="surface_slate_800">#1E293B</color>
+    <color name="border_slate_700">#334155</color>
+    <color name="primary_blue">#2563EB</color>
+    <color name="accent_amber">#FBBF24</color>
+    <color name="status_emerald">#34D399</color>
+    <color name="status_red">#DC2626</color>
+    <color name="text_white">#FFFFFF</color>
+    <color name="text_slate_300">#CBD5E1</color>
+    <color name="text_slate_400">#94A3B8</color>
+</resources>

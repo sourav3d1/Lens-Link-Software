@@ -1510,6 +1510,25 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
                   </li>
                 </ul>
               </div>
+
+              <div className="p-6 rounded-xl bg-white border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div className="space-y-1">
+                  <h3 className="text-sm font-semibold text-slate-900">
+                    Native Android Mobile App (Kotlin / Android Studio)
+                  </h3>
+                  <p className="text-sm text-slate-600 leading-relaxed">
+                    Download the pre-configured Android Studio project with native Camera2/WebRTC streaming, QR scanner, pinch-to-zoom, and long-press brightness control.
+                  </p>
+                </div>
+                <a
+                  href={`/api/android-app/bundle?origin=${encodeURIComponent(window.location.origin)}`}
+                  download="lenslink-android-studio.zip"
+                  className="px-4 py-2.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold inline-flex items-center justify-center gap-2 whitespace-nowrap shrink-0 transition-colors"
+                >
+                  <Smartphone className="w-4 h-4" />
+                  <span>Download Android App (.zip)</span>
+                </a>
+              </div>
             </div>
           )}
         </div>

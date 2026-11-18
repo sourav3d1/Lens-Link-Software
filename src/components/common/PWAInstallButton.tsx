@@ -338,6 +338,17 @@ function MobileInstallGuideModal({
                 )}
               </div>
             )}
+
+            <div className="pt-1 border-t border-slate-800 flex items-center justify-between gap-2 text-xs">
+              <span className="text-slate-400">Want the native Kotlin source?</span>
+              <a
+                href={`/api/android-app/bundle?origin=${encodeURIComponent(window.location.origin)}`}
+                download="lenslink-android-studio.zip"
+                className="text-blue-400 hover:text-blue-300 font-semibold whitespace-nowrap"
+              >
+                Android Studio (.zip)
+              </a>
+            </div>
           </div>
         )}
 
