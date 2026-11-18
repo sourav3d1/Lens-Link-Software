@@ -11,6 +11,7 @@ import {
   RefreshCw,
   RotateCcw,
   SlidersHorizontal,
+  Sun,
   Video,
   VideoOff,
   X,
@@ -71,9 +72,15 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
   const [captureFlash, setCaptureFlash] = useState(false);
   const [focusReticle, setFocusReticle] = useState<{ x: number; y: number } | null>(null);
   const [zoomToast, setZoomToast] = useState(false);
+  const [brightnessHud, setBrightnessHud] = useState<{
+    xPct: number;
+    yPct: number;
+    dragging: boolean;
+  } | null>(null);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const viewfinderRef = useRef<HTMLDivElement | null>(null);
+  const brightnessTrackRef = useRef<HTMLDivElement | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
@@ -86,12 +93,35 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
   const wakeLockRef = useRef<{ release: () => Promise<void> } | null>(null);
   const focusReticleTimerRef = useRef<number | null>(null);
   const zoomToastTimerRef = useRef<number | null>(null);
+  const brightnessHideTimerRef = useRef<number | null>(null);
+  const longPressTimerRef = useRef<number | null>(null);
+  const activePointersRef = useRef<Set<number>>(new Set());
+  const suppressNextTapRef = useRef(false);
+  const hudTrackDraggingRef = useRef(false);
 
   const pinchStateRef = useRef<{
     active: boolean;
     startDist: number;
     startTotalZoom: number;
   }>({ active: false, startDist: 0, startTotalZoom: 1 });
+
+  const brightnessGestureRef = useRef<{
+    tracking: boolean;
+    active: boolean;
+    pointerId: number | null;
+    startX: number;
+    startY: number;
+    startBrightness: number;
+    lastSentBrightness: number;
+  }>({
+    tracking: false,
+    active: false,
+    pointerId: null,
+    startX: 0,
+    startY: 0,
+    startBrightness: 0,
+    lastSentBrightness: 0,
+  });
 
   settingsRef.current = settings;
   capabilitiesRef.current = capabilities;
@@ -517,6 +547,10 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
   useEffect(() => {
     return () => {
       isMountedRef.current = false;
+      if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+      if (brightnessHideTimerRef.current) clearTimeout(brightnessHideTimerRef.current);
+      if (focusReticleTimerRef.current) clearTimeout(focusReticleTimerRef.current);
+      if (zoomToastTimerRef.current) clearTimeout(zoomToastTimerRef.current);
       stopCameraStream();
       closePeerConnection();
       void releaseWakeLock();
@@ -616,9 +650,46 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
     [updateSetting]
   );
 
-  // Pinch-to-zoom & Tap-to-focus gesture handlers on viewfinder
+  const clearLongPressTimer = useCallback(() => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleBrightnessHudHide = useCallback((delayMs = 2200) => {
+    if (brightnessHideTimerRef.current) {
+      clearTimeout(brightnessHideTimerRef.current);
+    }
+    brightnessHideTimerRef.current = window.setTimeout(() => {
+      setBrightnessHud(null);
+      brightnessHideTimerRef.current = null;
+    }, delayMs);
+  }, []);
+
+  const applyBrightnessValue = useCallback(
+    (rawValue: number) => {
+      const clamped = Math.max(-50, Math.min(50, Math.round(rawValue)));
+      if (clamped !== settingsRef.current.brightness) {
+        void updateSetting({ brightness: clamped });
+      }
+    },
+    [updateSetting]
+  );
+
+  // Pinch-to-zoom, Long-press brightness & Tap-to-focus gesture handlers on viewfinder
   const handleTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
     if (e.touches.length === 2) {
+      clearLongPressTimer();
+      brightnessGestureRef.current = {
+        tracking: false,
+        active: false,
+        pointerId: null,
+        startX: 0,
+        startY: 0,
+        startBrightness: settingsRef.current.brightness,
+        lastSentBrightness: settingsRef.current.brightness,
+      };
       const dx = e.touches[0].clientX - e.touches[1].clientX;
       const dy = e.touches[0].clientY - e.touches[1].clientY;
       const dist = Math.hypot(dx, dy);
@@ -648,8 +719,160 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
     }
   };
 
+  const handleViewfinderPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    if ((e.target as HTMLElement)?.closest('[data-viewfinder-interactive="true"]')) {
+      return;
+    }
+
+    activePointersRef.current.add(e.pointerId);
+
+    if (activePointersRef.current.size > 1 || pinchStateRef.current.active) {
+      clearLongPressTimer();
+      brightnessGestureRef.current.tracking = false;
+      brightnessGestureRef.current.active = false;
+      return;
+    }
+
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startBrightness = settingsRef.current.brightness;
+
+    brightnessGestureRef.current = {
+      tracking: true,
+      active: false,
+      pointerId: e.pointerId,
+      startX,
+      startY,
+      startBrightness,
+      lastSentBrightness: startBrightness,
+    };
+
+    clearLongPressTimer();
+    longPressTimerRef.current = window.setTimeout(() => {
+      const gesture = brightnessGestureRef.current;
+      if (
+        !isMountedRef.current ||
+        pinchStateRef.current.active ||
+        activePointersRef.current.size !== 1 ||
+        !gesture.tracking ||
+        gesture.pointerId !== e.pointerId ||
+        !viewfinderRef.current
+      ) {
+        return;
+      }
+
+      const rect = viewfinderRef.current.getBoundingClientRect();
+      const relXPct = ((startX - rect.left) / Math.max(1, rect.width)) * 100;
+      const relYPct = ((startY - rect.top) / Math.max(1, rect.height)) * 100;
+
+      // Place vertical brightness slider cleanly beside the pressed spot without clipping
+      const offsetXPct = relXPct > 66 ? relXPct - 16 : relXPct + 16;
+      const xPct = Math.min(86, Math.max(14, offsetXPct));
+      const yPct = Math.min(72, Math.max(28, relYPct));
+
+      gesture.active = true;
+      suppressNextTapRef.current = true;
+      if (brightnessHideTimerRef.current) {
+        clearTimeout(brightnessHideTimerRef.current);
+        brightnessHideTimerRef.current = null;
+      }
+      setFocusReticle(null);
+      setBrightnessHud({ xPct, yPct, dragging: true });
+
+      try {
+        viewfinderRef.current.setPointerCapture(e.pointerId);
+      } catch {
+        // Pointer capture optional
+      }
+      try {
+        navigator.vibrate?.(12);
+      } catch {
+        // Vibration optional
+      }
+    }, 380);
+  };
+
+  const handleViewfinderPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const gesture = brightnessGestureRef.current;
+    if (pinchStateRef.current.active || activePointersRef.current.size > 1) {
+      clearLongPressTimer();
+      gesture.tracking = false;
+      gesture.active = false;
+      return;
+    }
+    if (!gesture.tracking || gesture.pointerId !== e.pointerId) return;
+
+    if (!gesture.active) {
+      const moved = Math.hypot(e.clientX - gesture.startX, e.clientY - gesture.startY);
+      if (moved > 14) {
+        clearLongPressTimer();
+        gesture.tracking = false;
+      }
+      return;
+    }
+
+    // Slide up to increase brightness, slide down to decrease brightness
+    const deltaY = gesture.startY - e.clientY;
+    const deltaBrightness = Math.round((deltaY / 180) * 100);
+    const nextBrightness = Math.max(-50, Math.min(50, gesture.startBrightness + deltaBrightness));
+    if (nextBrightness !== gesture.lastSentBrightness) {
+      gesture.lastSentBrightness = nextBrightness;
+      applyBrightnessValue(nextBrightness);
+    }
+  };
+
+  const handleViewfinderPointerUpOrCancel = (e: React.PointerEvent<HTMLDivElement>) => {
+    activePointersRef.current.delete(e.pointerId);
+    const gesture = brightnessGestureRef.current;
+    if (gesture.pointerId !== e.pointerId) return;
+
+    clearLongPressTimer();
+    const wasActive = gesture.active;
+    brightnessGestureRef.current = {
+      tracking: false,
+      active: false,
+      pointerId: null,
+      startX: 0,
+      startY: 0,
+      startBrightness: settingsRef.current.brightness,
+      lastSentBrightness: settingsRef.current.brightness,
+    };
+
+    if (wasActive) {
+      suppressNextTapRef.current = true;
+      window.setTimeout(() => {
+        suppressNextTapRef.current = false;
+      }, 350);
+      setBrightnessHud((prev) => (prev ? { ...prev, dragging: false } : null));
+      scheduleBrightnessHudHide(2200);
+    }
+  };
+
+  const updateBrightnessFromTrackPointer = (clientY: number) => {
+    const track = brightnessTrackRef.current;
+    if (!track) return;
+    const rect = track.getBoundingClientRect();
+    const ratioFromBottom = Math.min(
+      1,
+      Math.max(0, (rect.bottom - clientY) / Math.max(1, rect.height))
+    );
+    const nextBrightness = Math.round(ratioFromBottom * 100 - 50);
+    applyBrightnessValue(nextBrightness);
+  };
+
   const handleViewfinderTap = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (suppressNextTapRef.current) {
+      suppressNextTapRef.current = false;
+      return;
+    }
+    if ((e.target as HTMLElement)?.closest('[data-viewfinder-interactive="true"]')) {
+      return;
+    }
     if (pinchStateRef.current.active || !viewfinderRef.current) return;
+    if (brightnessHud) {
+      setBrightnessHud(null);
+    }
     const rect = viewfinderRef.current.getBoundingClientRect();
     const relX = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
     const relY = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
@@ -892,14 +1115,20 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
         </div>
       </header>
 
-      {/* Live Camera Viewfinder (Pinch to Zoom + Tap to Focus) */}
+      {/* Live Camera Viewfinder (Pinch to Zoom + Long-Press Brightness + Tap to Focus) */}
       <div
         ref={viewfinderRef}
         onTouchStart={handleTouchStart}
         onTouchMove={handleTouchMove}
         onTouchEnd={handleTouchEnd}
+        onPointerDown={handleViewfinderPointerDown}
+        onPointerMove={handleViewfinderPointerMove}
+        onPointerUp={handleViewfinderPointerUpOrCancel}
+        onPointerCancel={handleViewfinderPointerUpOrCancel}
+        onContextMenu={(e) => e.preventDefault()}
         onClick={handleViewfinderTap}
-        className="relative flex-1 bg-black flex items-center justify-center overflow-hidden touch-none"
+        style={{ WebkitTouchCallout: 'none' }}
+        className="relative flex-1 bg-black flex items-center justify-center overflow-hidden touch-none select-none"
       >
         <video
           ref={handleVideoRef}
@@ -934,6 +1163,81 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
           </div>
         )}
 
+        {/* Long-Press Vertical Brightness Controller */}
+        {brightnessHud && (
+          <div
+            data-viewfinder-interactive="true"
+            role="slider"
+            aria-label="Camera brightness"
+            aria-valuemin={-50}
+            aria-valuemax={50}
+            aria-valuenow={settings.brightness}
+            style={{
+              left: `${brightnessHud.xPct}%`,
+              top: `${brightnessHud.yPct}%`,
+            }}
+            onClick={(e) => e.stopPropagation()}
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              if (brightnessHideTimerRef.current) {
+                clearTimeout(brightnessHideTimerRef.current);
+                brightnessHideTimerRef.current = null;
+              }
+              try {
+                e.currentTarget.setPointerCapture(e.pointerId);
+              } catch {
+                // Optional capture
+              }
+              hudTrackDraggingRef.current = true;
+              setBrightnessHud((prev) => (prev ? { ...prev, dragging: true } : null));
+              updateBrightnessFromTrackPointer(e.clientY);
+            }}
+            onPointerMove={(e) => {
+              if (e.buttons === 0 && e.pointerType === 'mouse') return;
+              if (!hudTrackDraggingRef.current) return;
+              e.stopPropagation();
+              updateBrightnessFromTrackPointer(e.clientY);
+            }}
+            onPointerUp={(e) => {
+              e.stopPropagation();
+              hudTrackDraggingRef.current = false;
+              setBrightnessHud((prev) => (prev ? { ...prev, dragging: false } : null));
+              scheduleBrightnessHudHide(2200);
+            }}
+            onPointerCancel={(e) => {
+              e.stopPropagation();
+              hudTrackDraggingRef.current = false;
+              setBrightnessHud((prev) => (prev ? { ...prev, dragging: false } : null));
+              scheduleBrightnessHudHide(2200);
+            }}
+            className="absolute -translate-x-1/2 -translate-y-1/2 z-30 flex flex-col items-center gap-2.5 px-2.5 py-3 rounded-2xl bg-slate-950/80 backdrop-blur-md border border-white/15 shadow-2xl touch-none"
+          >
+            <Sun className="w-4 h-4 text-amber-400 shrink-0" />
+            <div
+              ref={brightnessTrackRef}
+              className="relative w-7 h-40 flex items-center justify-center"
+            >
+              <div className="relative w-1.5 h-full rounded-full bg-white/25 overflow-hidden">
+                <div
+                  style={{
+                    height: `${Math.min(100, Math.max(0, settings.brightness + 50))}%`,
+                  }}
+                  className="absolute bottom-0 inset-x-0 bg-amber-400 rounded-full"
+                />
+              </div>
+              <div
+                style={{
+                  bottom: `calc(${Math.min(100, Math.max(0, settings.brightness + 50))}% - 8px)`,
+                }}
+                className="pointer-events-none absolute left-1/2 -translate-x-1/2 w-4 h-4 rounded-full bg-amber-400 border-2 border-slate-950 shadow-md"
+              />
+            </div>
+            <span className="font-mono tabular-nums text-[11px] font-semibold text-white min-w-[3.2ch] text-center">
+              {settings.brightness > 0 ? `+${settings.brightness}` : settings.brightness}%
+            </span>
+          </div>
+        )}
+
         {errorMsg && (
           <div className="absolute top-3 inset-x-4 z-20 flex items-center gap-2 p-3 rounded-xl bg-red-950/90 border border-red-800 text-xs text-red-100">
             <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
@@ -956,6 +1260,7 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
         {/* Last Captured Thumbnail Chip */}
         {lastCaptured && (
           <a
+            data-viewfinder-interactive="true"
             href={lastCaptured.dataUrl}
             download={`lenslink-photo-${Date.now()}.jpg`}
             onClick={(e) => e.stopPropagation()}
@@ -1287,13 +1592,16 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
                 type="range"
                 min={-50}
                 max={50}
-                step={5}
+                step={1}
                 value={settings.brightness}
                 onChange={(e) =>
                   void updateSetting({ brightness: Number(e.target.value) })
                 }
                 className="w-full lens-slider"
               />
+              <p className="text-[11px] text-slate-500">
+                Tip: Long-press the camera viewfinder and slide up or down to adjust brightness anytime.
+              </p>
             </div>
 
             {/* Contrast */}
