@@ -344,7 +344,9 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
           pcRef.current = rtc;
 
           rtc.ontrack = (trackEvent) => {
-            const stream = trackEvent.streams[0];
+            const stream =
+              trackEvent.streams[0] ||
+              (trackEvent.track ? new MediaStream([trackEvent.track]) : null);
             if (stream) {
               remoteStreamRef.current = stream;
               if (videoRef.current) {

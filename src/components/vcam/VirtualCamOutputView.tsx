@@ -72,7 +72,9 @@ export function VirtualCamOutputView({ pairCode }: VirtualCamOutputViewProps) {
           pcRef.current = rtc;
 
           rtc.ontrack = (trackEvent) => {
-            const stream = trackEvent.streams[0];
+            const stream =
+              trackEvent.streams[0] ||
+              (trackEvent.track ? new MediaStream([trackEvent.track]) : null);
             if (videoRef.current && stream) {
               videoRef.current.srcObject = stream;
               void videoRef.current.play().catch(() => {});

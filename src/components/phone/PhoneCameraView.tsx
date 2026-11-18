@@ -97,6 +97,32 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
   capabilitiesRef.current = capabilities;
   isStreamingRef.current = isStreaming;
 
+  const attachStreamToVideo = useCallback((el: HTMLVideoElement | null, stream: MediaStream | null) => {
+    if (!el || !stream) return;
+    el.muted = true;
+    el.playsInline = true;
+    if (el.srcObject !== stream) {
+      el.srcObject = stream;
+    }
+    void el.play().catch(() => {});
+  }, []);
+
+  const handleVideoRef = useCallback(
+    (el: HTMLVideoElement | null) => {
+      videoRef.current = el;
+      if (el && localStreamRef.current) {
+        attachStreamToVideo(el, localStreamRef.current);
+      }
+    },
+    [attachStreamToVideo]
+  );
+
+  useEffect(() => {
+    if (permissionGranted && activeCode && videoRef.current && localStreamRef.current) {
+      attachStreamToVideo(videoRef.current, localStreamRef.current);
+    }
+  }, [permissionGranted, activeCode, attachStreamToVideo]);
+
   const stopCameraStream = useCallback(() => {
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((track) => track.stop());
@@ -225,8 +251,7 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
         }
         localStreamRef.current = stream;
         if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          await videoRef.current.play().catch(() => {});
+          attachStreamToVideo(videoRef.current, stream);
         }
 
         const track = stream.getVideoTracks()[0];
@@ -275,7 +300,7 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
         return null;
       }
     },
-    [sendWs, stopCameraStream]
+    [attachStreamToVideo, sendWs, stopCameraStream]
   );
 
   const handleCapturePhoto = useCallback(
@@ -674,7 +699,7 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
       setActiveCode(code);
       window.setTimeout(() => {
         void startLocalCamera(settingsRef.current);
-      }, 220);
+      }, 350);
     },
     [startLocalCamera]
   );
@@ -877,10 +902,13 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
         className="relative flex-1 bg-black flex items-center justify-center overflow-hidden touch-none"
       >
         <video
-          ref={videoRef}
+          ref={handleVideoRef}
           playsInline
           muted
           autoPlay
+          onLoadedMetadata={(e) => {
+            void e.currentTarget.play().catch(() => {});
+          }}
           style={{
             transform: videoTransform || undefined,
             filter: filterCss,

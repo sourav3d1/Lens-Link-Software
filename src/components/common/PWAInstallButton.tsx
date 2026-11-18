@@ -162,24 +162,39 @@ export function MobilePWAInstallButton({
 }) {
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
   const [showGuide, setShowGuide] = useState(false);
+  const [httpsOrigin, setHttpsOrigin] = useState<string | null>(null);
 
   if (isInstalled) return null;
 
-  const handleAction = () => {
-    if (isInstallable) {
-      void install();
-    } else {
-      setShowGuide(true);
+  const openFallbackGuide = () => {
+    setShowGuide(true);
+    if (window.location.protocol !== 'https:' && !httpsOrigin) {
+      fetch('/api/network-info')
+        .then((r) => r.json())
+        .then((data: { httpsOrigin?: string | null }) => {
+          if (data.httpsOrigin) setHttpsOrigin(data.httpsOrigin);
+        })
+        .catch(() => {});
     }
   };
 
+  const handleAction = async () => {
+    if (isInstallable) {
+      const outcome = await install();
+      if (outcome === 'unavailable') {
+        openFallbackGuide();
+      }
+      return;
+    }
+    openFallbackGuide();
+  };
+
   if (variant === 'icon') {
-    if (!isInstallable && !isIOS) return null;
     return (
       <>
         <button
           type="button"
-          onClick={handleAction}
+          onClick={() => void handleAction()}
           className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl hover:bg-white/10 text-blue-400"
           aria-label="Install LensLink Cam app"
           title="Install LensLink Cam"
@@ -187,7 +202,11 @@ export function MobilePWAInstallButton({
           <Download className="w-5 h-5" />
         </button>
         {showGuide && (
-          <MobileInstallGuideModal isIOS={isIOS} onClose={() => setShowGuide(false)} />
+          <MobileInstallGuideModal
+            isIOS={isIOS}
+            httpsOrigin={httpsOrigin}
+            onClose={() => setShowGuide(false)}
+          />
         )}
       </>
     );
@@ -205,21 +224,29 @@ export function MobilePWAInstallButton({
               Install LensLink Cam App
             </div>
             <div className="text-[11px] text-slate-400 truncate">
-              {isIOS ? 'Add to iPhone Home Screen' : 'Standalone mobile camera app'}
+              {isInstallable
+                ? 'Tap Install to add to home screen'
+                : isIOS
+                  ? 'Add to iPhone Home Screen'
+                  : 'Use as standalone mobile app'}
             </div>
           </div>
         </div>
         <button
           type="button"
-          onClick={handleAction}
-          className="min-h-[40px] px-3.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold whitespace-nowrap shrink-0 transition-colors"
+          onClick={() => void handleAction()}
+          className="min-h-[40px] px-3.5 rounded-xl bg-blue-600 hover:bg-blue-500 active:scale-[0.98] text-white text-xs font-semibold whitespace-nowrap shrink-0 transition-all"
         >
-          {isInstallable ? 'Install' : 'Get App'}
+          {isInstallable ? 'Install' : 'Install App'}
         </button>
       </div>
 
       {showGuide && (
-        <MobileInstallGuideModal isIOS={isIOS} onClose={() => setShowGuide(false)} />
+        <MobileInstallGuideModal
+          isIOS={isIOS}
+          httpsOrigin={httpsOrigin}
+          onClose={() => setShowGuide(false)}
+        />
       )}
     </>
   );
@@ -227,11 +254,19 @@ export function MobilePWAInstallButton({
 
 function MobileInstallGuideModal({
   isIOS,
+  httpsOrigin,
   onClose,
 }: {
   isIOS: boolean;
+  httpsOrigin: string | null;
   onClose: () => void;
 }) {
+  const isPlainHttp =
+    typeof window !== 'undefined' &&
+    window.location.protocol !== 'https:' &&
+    window.location.hostname !== 'localhost' &&
+    window.location.hostname !== '127.0.0.1';
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/70 p-4"
@@ -258,27 +293,58 @@ function MobileInstallGuideModal({
         {isIOS ? (
           <ol className="space-y-2.5 text-sm text-slate-300 list-decimal list-inside">
             <li>
-              Tap the <strong className="text-white inline-flex items-center gap-1"><Share className="w-3.5 h-3.5 inline" /> Share</strong> button in Safari.
+              Tap the{' '}
+              <strong className="text-white inline-flex items-center gap-1">
+                <Share className="w-3.5 h-3.5 inline" /> Share
+              </strong>{' '}
+              button in Safari.
             </li>
             <li>
               Scroll down and tap <strong className="text-white">Add to Home Screen</strong>.
             </li>
             <li>
-              Open <strong className="text-white">LensLink Cam</strong> directly from your Home Screen.
+              Open <strong className="text-white">LensLink Cam</strong> from your Home Screen.
             </li>
           </ol>
         ) : (
-          <ol className="space-y-2.5 text-sm text-slate-300 list-decimal list-inside">
-            <li>Open your browser menu (<strong className="text-white">⋮</strong>).</li>
-            <li>Tap <strong className="text-white">Install app</strong> or <strong className="text-white">Add to Home screen</strong>.</li>
-            <li>Launch <strong className="text-white">LensLink Cam</strong> like a native app.</li>
-          </ol>
+          <div className="space-y-3">
+            <ol className="space-y-2 text-sm text-slate-300 list-decimal list-inside">
+              <li>
+                Open your browser menu (<strong className="text-white">⋮</strong>) in the top right.
+              </li>
+              <li>
+                Tap <strong className="text-white">Add to Home screen</strong> or{' '}
+                <strong className="text-white">Install app</strong>.
+              </li>
+              <li>
+                Launch <strong className="text-white">LensLink Cam</strong> from your app drawer.
+              </li>
+            </ol>
+
+            {isPlainHttp && (
+              <div className="p-3 rounded-xl bg-slate-800/80 border border-slate-700 text-xs text-slate-300 space-y-2">
+                <p>
+                  Note: Over local <span className="font-mono">http://</span> Wi-Fi addresses, Android Chrome shows{' '}
+                  <strong className="text-white">Add to Home screen</strong> in the browser menu instead of an automatic popup.
+                </p>
+                {httpsOrigin && (
+                  <a
+                    href={`${httpsOrigin}/phone`}
+                    className="w-full min-h-[40px] px-3 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold inline-flex items-center justify-center gap-1.5"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Open HTTPS Link for 1-Tap Install</span>
+                  </a>
+                )}
+              </div>
+            )}
+          </div>
         )}
 
         <button
           type="button"
           onClick={onClose}
-          className="w-full min-h-[44px] rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold"
+          className="w-full min-h-[44px] rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-sm font-semibold"
         >
           Done
         </button>

@@ -21,6 +21,37 @@
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
   </head>
   <body class="antialiased selection:bg-blue-600 selection:text-white">
+    <script>
+      (function () {
+        window.__lenslinkDeferredPrompt = null;
+        window.addEventListener('beforeinstallprompt', function (e) {
+          e.preventDefault();
+          window.__lenslinkDeferredPrompt = e;
+          window.dispatchEvent(new Event('lenslink:install-ready'));
+        });
+        window.addEventListener('appinstalled', function () {
+          window.__lenslinkDeferredPrompt = null;
+          window.__lenslinkAppInstalled = true;
+          window.dispatchEvent(new Event('lenslink:app-installed'));
+        });
+
+        var search = window.location.search || '';
+        var path = (window.location.pathname || '').toLowerCase();
+        var isMobileUa = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || '');
+        var isVcam = path === '/vcam' || /[?&]mode=vcam\b/i.test(search);
+        var isPc = /[?&]mode=pc\b/i.test(search);
+        var isMobile = !isVcam && !isPc && (path === '/phone' || /[?&](mode=phone|pair=|code=)/i.test(search) || isMobileUa);
+        if (isMobile) {
+          var manifestLink = document.querySelector('link[rel="manifest"]');
+          if (manifestLink && manifestLink.getAttribute('href') !== '/phone-manifest.webmanifest') {
+            manifestLink.setAttribute('href', '/phone-manifest.webmanifest');
+          }
+          var appleTitle = document.querySelector('meta[name="apple-mobile-web-app-title"]');
+          if (appleTitle) appleTitle.setAttribute('content', 'LensLink Cam');
+          document.title = 'LensLink Cam — Wireless Phone Webcam';
+        }
+      })();
+    </script>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

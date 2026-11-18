@@ -60,6 +60,25 @@ export default defineConfig(() => {
           type: 'module',
         },
       }),
+      {
+        name: 'lenslink-mobile-manifest',
+        transformIndexHtml: {
+          order: 'post',
+          handler(html, ctx) {
+            const url = ctx.originalUrl || '';
+            const isPhoneUrl =
+              url.startsWith('/phone') || /[?&](mode=phone|pair=|code=)/i.test(url);
+            if (!isPhoneUrl) return html;
+            return html
+              .replace(/href="\/manifest\.webmanifest"/g, 'href="/phone-manifest.webmanifest"')
+              .replace('content="LensLink"', 'content="LensLink Cam"')
+              .replace(
+                '<title>LensLink — Wireless Smartphone Webcam</title>',
+                '<title>LensLink Cam — Wireless Phone Webcam</title>'
+              );
+          },
+        },
+      },
     ],
     resolve: {
       alias: {

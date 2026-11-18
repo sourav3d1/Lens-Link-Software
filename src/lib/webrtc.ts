@@ -73,20 +73,33 @@ export async function getCameraStreamSafe(
     );
   }
 
-  try {
-    return await navigator.mediaDevices.getUserMedia(buildMediaConstraints(settings));
-  } catch (err) {
-    const fallbackConstraints: MediaStreamConstraints = {
-      audio: false,
-      video: settings.deviceId
-        ? { deviceId: { ideal: settings.deviceId } }
-        : { facingMode: { ideal: settings.facingMode } },
-    };
+  const acquire = async () => {
     try {
-      return await navigator.mediaDevices.getUserMedia(fallbackConstraints);
-    } catch {
-      throw err;
+      return await navigator.mediaDevices.getUserMedia(buildMediaConstraints(settings));
+    } catch (err) {
+      const fallbackConstraints: MediaStreamConstraints = {
+        audio: false,
+        video: settings.deviceId
+          ? { deviceId: { ideal: settings.deviceId } }
+          : { facingMode: { ideal: settings.facingMode } },
+      };
+      try {
+        return await navigator.mediaDevices.getUserMedia(fallbackConstraints);
+      } catch {
+        throw err;
+      }
     }
+  };
+
+  try {
+    return await acquire();
+  } catch (err) {
+    const name = err instanceof DOMException ? err.name : '';
+    if (name === 'NotReadableError' || name === 'AbortError' || name === 'TrackStartError') {
+      await new Promise((resolve) => window.setTimeout(resolve, 350));
+      return await acquire();
+    }
+    throw err;
   }
 }
 

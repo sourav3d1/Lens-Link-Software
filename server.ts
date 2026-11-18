@@ -273,12 +273,16 @@ async function startServer() {
       suggestedOrigin = `http://${preferredIp}:${PORT}`;
     }
 
+    const envAppUrl = (process.env.APP_URL || '').trim();
+    const httpsOrigin = /^https:\/\/[^/]+/i.test(envAppUrl) ? envAppUrl.replace(/\/+$/, '') : null;
+
     res.json({
       lanIps,
       preferredIp,
       port: PORT,
       isLocalhostRequest,
       suggestedOrigin,
+      httpsOrigin,
     });
   });
 
@@ -784,9 +788,29 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distDir = path.join(__dirname, 'dist');
+    const indexHtmlPath = path.join(distDir, 'index.html');
     app.use(express.static(distDir));
-    app.get('*', (_req, res) => {
-      res.sendFile(path.join(distDir, 'index.html'));
+    app.get('*', (req, res) => {
+      const reqPath = (req.path || '').toLowerCase();
+      const isPhoneReq =
+        reqPath === '/phone' ||
+        req.query.mode === 'phone' ||
+        Boolean(req.query.pair) ||
+        Boolean(req.query.code);
+      if (isPhoneReq && fs.existsSync(indexHtmlPath)) {
+        const html = fs
+          .readFileSync(indexHtmlPath, 'utf8')
+          .replace('href="/manifest.webmanifest"', 'href="/phone-manifest.webmanifest"')
+          .replace('content="LensLink"', 'content="LensLink Cam"')
+          .replace(
+            '<title>LensLink — Wireless Smartphone Webcam</title>',
+            '<title>LensLink Cam — Wireless Phone Webcam</title>'
+          );
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.send(html);
+        return;
+      }
+      res.sendFile(indexHtmlPath);
     });
   }
 
