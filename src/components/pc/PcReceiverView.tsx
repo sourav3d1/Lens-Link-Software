@@ -41,6 +41,7 @@ import {
 import { VirtualCamPanel } from '../vcam/VirtualCamPanel';
 import { QrCodeDisplay } from '../common/QrCodeDisplay';
 import { PWAInstallButton } from '../common/PWAInstallButton';
+import { downloadBundle } from '../../lib/download';
 
 const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 
@@ -109,6 +110,8 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
   const [copiedLink, setCopiedLink] = useState(false);
   const [localOnlyIce, setLocalOnlyIce] = useState<boolean>(() => isLocalLanHostname());
   const [capturedPhotos, setCapturedPhotos] = useState<CapturedPhoto[]>([]);
+  const [downloadingAndroid, setDownloadingAndroid] = useState(false);
+  const [androidDownloadError, setAndroidDownloadError] = useState<string | null>(null);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const videoContainerRef = useRef<HTMLDivElement | null>(null);
@@ -470,12 +473,28 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
     return () => clearInterval(interval);
   }, [connectionStatus]);
 
-  // Auto-enable frame relay when Python Virtual Cam bridge or OBS Browser Source fallback connects
+  // Auto-enable frame relay when Virtual Cam extension, DirectShow bridge, or fallback browser source connects
   useEffect(() => {
     if ((vcamBridgeCount > 0 || vcamWebFrameCount > 0) && hasVideoTrack) {
       setBridgeStreamEnabled(true);
     }
   }, [vcamBridgeCount, vcamWebFrameCount, hasVideoTrack]);
+
+  // Publish active PC session code for Browser Virtual Webcam extension auto-pairing
+  useEffect(() => {
+    if (!pairCode) return;
+    document.documentElement.setAttribute('data-lenslink-pc-code', pairCode);
+    document.documentElement.setAttribute('data-lenslink-origin', window.location.origin);
+    window.dispatchEvent(
+      new CustomEvent('lenslink:pc-session', {
+        detail: { pairCode, origin: window.location.origin },
+      })
+    );
+    return () => {
+      document.documentElement.removeAttribute('data-lenslink-pc-code');
+      document.documentElement.removeAttribute('data-lenslink-origin');
+    };
+  }, [pairCode]);
 
   // Stream JPEG frames via Web Worker timer (avoids Chrome background-tab throttling when OBS is focused)
   useEffect(() => {
@@ -1532,7 +1551,7 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
                     03. Select Virtual Webcam
                   </h2>
                   <p className="text-sm text-slate-600 leading-relaxed">
-                    Open the Virtual Webcam tab to run the Windows DirectShow bridge or connect OBS Virtual Camera, then choose it inside Zoom, Microsoft Teams, or Google Meet.
+                    Open the Virtual Webcam tab to install the Browser Virtual Webcam extension or standalone Windows DirectShow driver (no OBS Studio needed), then choose LensLink inside Google Meet, Zoom, Teams, or BIS portals.
                   </p>
                 </div>
               </div>
@@ -1554,23 +1573,40 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
                 </ul>
               </div>
 
-              <div className="p-6 rounded-xl bg-white border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                <div className="space-y-1">
-                  <h3 className="text-sm font-semibold text-slate-900">
-                    Native Android Mobile App (Kotlin / Android Studio)
-                  </h3>
-                  <p className="text-sm text-slate-600 leading-relaxed">
-                    Download the pre-configured Android Studio project with native Camera2/WebRTC streaming, QR scanner, pinch-to-zoom, and long-press brightness control.
-                  </p>
+              <div className="p-6 rounded-xl bg-white border border-slate-200 space-y-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div className="space-y-1">
+                    <h3 className="text-sm font-semibold text-slate-900">
+                      Native Android Mobile App (Kotlin / Android Studio)
+                    </h3>
+                    <p className="text-sm text-slate-600 leading-relaxed">
+                      Download the pre-configured Android Studio project with native Camera2/WebRTC streaming, QR scanner, pinch-to-zoom, and long-press brightness control.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={downloadingAndroid}
+                    onClick={async () => {
+                      setDownloadingAndroid(true);
+                      setAndroidDownloadError(null);
+                      const result = await downloadBundle(
+                        `/api/android-app/bundle?origin=${encodeURIComponent(window.location.origin)}`,
+                        'lenslink-android-studio.zip'
+                      );
+                      setDownloadingAndroid(false);
+                      if (!result.ok) {
+                        setAndroidDownloadError(result.error || 'Download failed.');
+                      }
+                    }}
+                    className="px-4 py-2.5 rounded-lg bg-slate-900 hover:bg-slate-800 disabled:opacity-60 text-white text-xs font-semibold inline-flex items-center justify-center gap-2 whitespace-nowrap shrink-0 transition-colors"
+                  >
+                    <Smartphone className="w-4 h-4" />
+                    <span>{downloadingAndroid ? 'Preparing .zip...' : 'Download Android App (.zip)'}</span>
+                  </button>
                 </div>
-                <a
-                  href={`/api/android-app/bundle?origin=${encodeURIComponent(window.location.origin)}`}
-                  download="lenslink-android-studio.zip"
-                  className="px-4 py-2.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold inline-flex items-center justify-center gap-2 whitespace-nowrap shrink-0 transition-colors"
-                >
-                  <Smartphone className="w-4 h-4" />
-                  <span>Download Android App (.zip)</span>
-                </a>
+                {androidDownloadError && (
+                  <p className="text-xs text-red-600">{androidDownloadError}</p>
+                )}
               </div>
             </div>
           )}

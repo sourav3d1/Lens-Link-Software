@@ -318,7 +318,14 @@ async function startServer() {
 
   app.get('/api/virtual-cam/bundle', (req, res) => {
     const vcamDir = path.join(__dirname, 'windows-virtual-cam');
-    const fileNames = ['lenslink_vcam.py', 'requirements.txt', 'start_virtual_cam.bat', 'README.md'];
+    const fileNames = [
+      'lenslink_vcam.py',
+      'requirements.txt',
+      'start_virtual_cam.bat',
+      'Install_Driver_No_OBS.bat',
+      'Uninstall_Driver.bat',
+      'README.md',
+    ];
 
     const rawOrigin = typeof req.query.origin === 'string' ? req.query.origin.trim() : '';
     let wsOrigin = `ws://127.0.0.1:${PORT}`;
@@ -356,6 +363,70 @@ async function startServer() {
     const zipBuffer = buildZipBuffer(files);
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', 'attachment; filename="lenslink-windows-vcam.zip"');
+    res.setHeader('Content-Length', String(zipBuffer.length));
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.send(zipBuffer);
+  });
+
+  app.get('/api/browser-cam/bundle', (req, res) => {
+    const extDir = path.join(__dirname, 'browser-virtual-cam');
+    if (!fs.existsSync(extDir)) {
+      res.status(404).json({ error: 'Browser virtual camera extension files not found' });
+      return;
+    }
+
+    const rawOrigin = typeof req.query.origin === 'string' ? req.query.origin.trim() : '';
+    let appOrigin = rawOrigin;
+    if (!/^https?:\/\/[^/]+$/i.test(appOrigin)) {
+      const proto = req.headers['x-forwarded-proto'] === 'https' || req.secure ? 'https' : 'http';
+      appOrigin = `${proto}://${req.headers.host || `localhost:${PORT}`}`;
+    }
+
+    const files: Array<{ name: string; content: Buffer }> = [];
+    const extFileNames = [
+      'manifest.json',
+      'background.js',
+      'content-isolated.js',
+      'content-main.js',
+      'popup.html',
+      'popup.js',
+      'default-config.json',
+      'README.txt',
+    ];
+
+    for (const fileName of extFileNames) {
+      const fullPath = path.join(extDir, fileName);
+      if (!fs.existsSync(fullPath)) continue;
+      let content = fs.readFileSync(fullPath);
+      if (fileName === 'default-config.json') {
+        content = Buffer.from(JSON.stringify({ serverOrigin: appOrigin }, null, 2) + '\n', 'utf8');
+      }
+      files.push({
+        name: `lenslink-browser-webcam/${fileName}`,
+        content,
+      });
+    }
+
+    const iconPath = path.join(__dirname, 'public', 'pwa-192x192.png');
+    if (fs.existsSync(iconPath)) {
+      files.push({
+        name: 'lenslink-browser-webcam/icon.png',
+        content: fs.readFileSync(iconPath),
+      });
+    }
+
+    if (files.length === 0) {
+      res.status(404).json({ error: 'Browser virtual camera extension is empty' });
+      return;
+    }
+
+    const zipBuffer = buildZipBuffer(files);
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', 'attachment; filename="lenslink-browser-webcam.zip"');
+    res.setHeader('Content-Length', String(zipBuffer.length));
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     res.send(zipBuffer);
   });
 
@@ -428,9 +499,9 @@ async function startServer() {
       '   and 6-character session code. Scan each PC\'s QR code with its paired',
       '   smartphone so multiple workstations operate independently on the same Wi-Fi.',
       '',
-      '4. Windows Virtual Webcam (Zoom / Teams / Google Meet):',
-      '   Open the included virtual-cam folder and run start_virtual_cam.bat',
-      '   (requires Python 3.10+ and OBS Virtual Camera or Unity Capture driver).',
+      '4. Windows Virtual Webcam (No OBS Studio Required):',
+      '   Open the included virtual-cam folder and run Install_Driver_No_OBS.bat',
+      '   followed by start_virtual_cam.bat to expose a native DirectShow webcam.',
       '',
     ].join('\r\n');
 
@@ -441,7 +512,14 @@ async function startServer() {
     ];
 
     const vcamDir = path.join(__dirname, 'windows-virtual-cam');
-    for (const fileName of ['lenslink_vcam.py', 'requirements.txt', 'start_virtual_cam.bat', 'README.md']) {
+    for (const fileName of [
+      'lenslink_vcam.py',
+      'requirements.txt',
+      'start_virtual_cam.bat',
+      'Install_Driver_No_OBS.bat',
+      'Uninstall_Driver.bat',
+      'README.md',
+    ]) {
       const fullPath = path.join(vcamDir, fileName);
       if (fs.existsSync(fullPath)) {
         files.push({
@@ -454,6 +532,9 @@ async function startServer() {
     const zipBuffer = buildZipBuffer(files);
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', 'attachment; filename="lenslink-pc-windows.zip"');
+    res.setHeader('Content-Length', String(zipBuffer.length));
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     res.send(zipBuffer);
   });
 
@@ -506,6 +587,9 @@ async function startServer() {
     const zipBuffer = buildZipBuffer(files);
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', 'attachment; filename="lenslink-android-studio.zip"');
+    res.setHeader('Content-Length', String(zipBuffer.length));
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     res.send(zipBuffer);
   });
 

@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LensLink Virtual Webcam</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        width: 340px;
+        margin: 0;
+        padding: 16px;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        background: #0f172a;
+        color: #f8fafc;
+      }
+      .header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 12px;
+      }
+      .title {
+        font-size: 14px;
+        font-weight: 700;
+      }
+      .badge {
+        font-size: 11px;
+        padding: 3px 8px;
+        border-radius: 6px;
+        background: #1e293b;
+        color: #94a3b8;
+        font-weight: 600;
+      }
+      .badge.live {
+        background: rgba(16, 185, 129, 0.16);
+        color: #34d399;
+      }
+      .badge.warn {
+        background: rgba(245, 158, 11, 0.16);
+        color: #fbbf24;
+      }
+      .preview-box {
+        position: relative;
+        width: 100%;
+        aspect-ratio: 16 / 9;
+        border-radius: 10px;
+        overflow: hidden;
+        background: #020617;
+        border: 1px solid #1e293b;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin-bottom: 12px;
+      }
+      .preview-box img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: none;
+      }
+      .preview-empty {
+        font-size: 12px;
+        color: #64748b;
+        text-align: center;
+        padding: 12px;
+      }
+      .status-line {
+        font-size: 11px;
+        color: #cbd5e1;
+        margin-bottom: 12px;
+        line-height: 1.4;
+      }
+      .field {
+        margin-bottom: 10px;
+      }
+      label {
+        display: block;
+        font-size: 11px;
+        font-weight: 600;
+        color: #94a3b8;
+        margin-bottom: 4px;
+      }
+      input[type='text'] {
+        width: 100%;
+        padding: 8px 10px;
+        border-radius: 8px;
+        border: 1px solid #334155;
+        background: #020617;
+        color: #f8fafc;
+        font-size: 12px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+      .toggle-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 8px 10px;
+        border-radius: 8px;
+        background: #1e293b;
+        margin-bottom: 8px;
+      }
+      .toggle-label {
+        font-size: 12px;
+        font-weight: 500;
+        color: #e2e8f0;
+      }
+      .toggle-sub {
+        font-size: 10px;
+        color: #94a3b8;
+      }
+      button {
+        width: 100%;
+        padding: 9px 12px;
+        border-radius: 8px;
+        border: none;
+        background: #2563eb;
+        color: #ffffff;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #1d4ed8;
+      }
+      .hint {
+        margin-top: 10px;
+        font-size: 11px;
+        color: #94a3b8;
+        line-height: 1.45;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="header">
+      <div class="title">LensLink Virtual Webcam</div>
+      <div id="statusBadge" class="badge">Idle</div>
+    </div>
+
+    <div class="preview-box">
+      <img id="previewImg" alt="Live camera preview" />
+      <div id="previewEmpty" class="preview-empty">Waiting for live smartphone preview...</div>
+    </div>
+
+    <div id="statusText" class="status-line">Open LensLink PC Receiver tab to auto-pair.</div>
+
+    <div class="field">
+      <label for="pairCodeInput">Pairing Code (6 characters)</label>
+      <input id="pairCodeInput" type="text" maxlength="6" placeholder="e.g. A7K9M2" />
+    </div>
+
+    <div class="field">
+      <label for="serverOriginInput">LensLink Server URL</label>
+      <input id="serverOriginInput" type="text" placeholder="https://..." />
+    </div>
+
+    <div class="toggle-row">
+      <div>
+        <div class="toggle-label">Enable Virtual Webcam</div>
+        <div class="toggle-sub">Adds "LensLink Wireless Camera" to browsers</div>
+      </div>
+      <input id="enabledToggle" type="checkbox" checked />
+    </div>
+
+    <div class="toggle-row">
+      <div>
+        <div class="toggle-label">Set as Default Camera</div>
+        <div class="toggle-sub">Auto-use on sites without a camera dropdown</div>
+      </div>
+      <input id="defaultToggle" type="checkbox" />
+    </div>
+
+    <button id="saveBtn" type="button">Save &amp; Reconnect</button>
+
+    <div class="hint">
+      In Google Meet, Zoom Web, Microsoft Teams, or BIS portals, choose
+      <strong>LensLink Wireless Camera</strong> — no OBS Studio required.
+    </div>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

@@ -9,12 +9,20 @@ import {
   Share,
 } from 'lucide-react';
 import { useOnlineStatus, usePWAInstall } from '../../hooks/usePWAInstall';
+import { downloadBundle } from '../../lib/download';
 
 export function PWAInstallButton() {
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
   const [showGuide, setShowGuide] = useState(false);
+  const [downloadingWin, setDownloadingWin] = useState(false);
 
   const windowsBundleUrl = `/api/pc-app/bundle?origin=${encodeURIComponent(window.location.origin)}`;
+
+  const handleDownloadWin = async () => {
+    setDownloadingWin(true);
+    await downloadBundle(windowsBundleUrl, 'lenslink-pc-windows.zip');
+    setDownloadingWin(false);
+  };
 
   if (isInstalled) {
     return (
@@ -23,13 +31,14 @@ export function PWAInstallButton() {
           <CheckCircle2 className="w-4 h-4 shrink-0" />
           <span>Installed as Standalone App</span>
         </div>
-        <a
-          href={windowsBundleUrl}
-          download="lenslink-pc-windows.zip"
-          className="text-xs font-medium text-blue-600 hover:text-blue-700 whitespace-nowrap"
+        <button
+          type="button"
+          disabled={downloadingWin}
+          onClick={() => void handleDownloadWin()}
+          className="text-xs font-medium text-blue-600 hover:text-blue-700 whitespace-nowrap disabled:opacity-60"
         >
-          Win Tools (.zip)
-        </a>
+          {downloadingWin ? 'Preparing...' : 'Win Tools (.zip)'}
+        </button>
       </div>
     );
   }
@@ -74,14 +83,15 @@ export function PWAInstallButton() {
             </button>
           )}
 
-          <a
-            href={windowsBundleUrl}
-            download="lenslink-pc-windows.zip"
-            className="w-full py-2 px-4 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold inline-flex items-center justify-center gap-2 transition-colors"
+          <button
+            type="button"
+            disabled={downloadingWin}
+            onClick={() => void handleDownloadWin()}
+            className="w-full py-2 px-4 rounded-lg bg-slate-100 hover:bg-slate-200 disabled:opacity-60 text-slate-800 text-xs font-semibold inline-flex items-center justify-center gap-2 transition-colors"
           >
             <Download className="w-3.5 h-3.5" />
-            <span>Download Windows Installer (.zip)</span>
-          </a>
+            <span>{downloadingWin ? 'Preparing .zip...' : 'Download Windows Installer (.zip)'}</span>
+          </button>
         </div>
       </section>
 
@@ -131,14 +141,15 @@ export function PWAInstallButton() {
 
             <div className="flex items-center justify-end gap-2 pt-2">
               {!isIOS && (
-                <a
-                  href={windowsBundleUrl}
-                  download="lenslink-pc-windows.zip"
-                  className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold inline-flex items-center gap-1.5"
+                <button
+                  type="button"
+                  disabled={downloadingWin}
+                  onClick={() => void handleDownloadWin()}
+                  className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white text-xs font-semibold inline-flex items-center gap-1.5"
                 >
                   <Download className="w-3.5 h-3.5" />
-                  <span>Download .zip</span>
-                </a>
+                  <span>{downloadingWin ? 'Preparing...' : 'Download .zip'}</span>
+                </button>
               )}
               <button
                 type="button"
@@ -341,13 +352,18 @@ function MobileInstallGuideModal({
 
             <div className="pt-1 border-t border-slate-800 flex items-center justify-between gap-2 text-xs">
               <span className="text-slate-400">Want the native Kotlin source?</span>
-              <a
-                href={`/api/android-app/bundle?origin=${encodeURIComponent(window.location.origin)}`}
-                download="lenslink-android-studio.zip"
+              <button
+                type="button"
+                onClick={() =>
+                  void downloadBundle(
+                    `/api/android-app/bundle?origin=${encodeURIComponent(window.location.origin)}`,
+                    'lenslink-android-studio.zip'
+                  )
+                }
                 className="text-blue-400 hover:text-blue-300 font-semibold whitespace-nowrap"
               >
                 Android Studio (.zip)
-              </a>
+              </button>
             </div>
           </div>
         )}

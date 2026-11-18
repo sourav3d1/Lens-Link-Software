@@ -1,9 +1,9 @@
 """
-LensLink Windows Virtual Camera Bridge
---------------------------------------
+LensLink Windows Virtual Camera Bridge (No OBS Required)
+--------------------------------------------------------
 Connects to the LensLink signaling server as a virtual camera receiver and
-outputs incoming frames directly to a Windows Virtual Camera device
-(OBS Virtual Camera or Unity Capture via pyvirtualcam).
+outputs incoming frames directly to a native Windows DirectShow Virtual Camera
+(standalone Unity Capture driver or OBS Virtual Camera if present).
 
 Uses a decoupled latest-frame pump so virtual camera output stays smooth and
 low-latency without accumulating WebSocket frame lag.
@@ -50,25 +50,35 @@ def build_idle_frame(width: int, height: int, code: str) -> np.ndarray:
     return frame
 
 
+def open_virtual_camera(width: int, height: int, fps: int, backend: str | None) -> pyvirtualcam.Camera:
+    base_kwargs = {"width": width, "height": height, "fps": fps, "fmt": pyvirtualcam.PixelFormat.RGB}
+    if backend:
+        return pyvirtualcam.Camera(**base_kwargs, backend=backend)
+
+    # Prefer standalone DirectShow driver (no OBS needed), then fall back to default auto-detection
+    for candidate in ("unitycapture", None):
+        try:
+            kwargs = {**base_kwargs, **({"backend": candidate} if candidate else {})}
+            return pyvirtualcam.Camera(**kwargs)
+        except Exception:
+            if candidate is None:
+                raise
+
+
 async def run_bridge(server_url: str, pairing_code: str, width: int, height: int, fps: int, backend: str | None):
     code = pairing_code.strip().upper()
     base_ws = normalize_ws_url(server_url)
     ws_url = f"{base_ws}/ws?role=vcam&code={code}"
     print(f"[LensLink VCam] Connecting to {ws_url} ...")
 
-    cam_kwargs = {"width": width, "height": height, "fps": fps, "fmt": pyvirtualcam.PixelFormat.RGB}
-    if backend:
-        cam_kwargs["backend"] = backend
-
     try:
-        cam = pyvirtualcam.Camera(**cam_kwargs)
+        cam = open_virtual_camera(width, height, fps, backend)
     except Exception as cam_err:
-        print(f"[LensLink VCam] ERROR opening virtual camera driver: {cam_err}")
-        print("[LensLink VCam] Tips:")
-        print("  1. Make sure OBS Studio v26+ or Unity Capture is installed.")
-        print("  2. If OBS Studio already has its Virtual Camera active, stop OBS Virtual Camera first")
-        print("     (or use OBS Browser Source from the LensLink Virtual Webcam tab instead).")
-        print("  3. Or run with --backend unitycapture if Unity Capture is installed.")
+        print(f"[LensLink VCam] ERROR opening Windows virtual camera driver: {cam_err}")
+        print("[LensLink VCam] Fix (No OBS Studio required):")
+        print("  1. Double-click Install_Driver_No_OBS.bat inside this folder to register")
+        print("     the standalone Windows DirectShow virtual camera driver.")
+        print("  2. Or install the LensLink Browser Extension for Chrome/Edge from the PC Receiver.")
         sys.exit(1)
 
     idle_frame = build_idle_frame(width, height, code)
@@ -96,7 +106,7 @@ async def run_bridge(server_url: str, pairing_code: str, width: int, height: int
     pump_thread.start()
 
     print(f"[LensLink VCam] Virtual webcam active: {cam.device} ({width}x{height} @ {fps}fps)")
-    print("[LensLink VCam] Select this camera in Zoom, Google Meet, Microsoft Teams, or OBS.")
+    print(f"[LensLink VCam] Select '{cam.device}' in Zoom, Microsoft Teams, Google Meet, or Windows Camera.")
 
     try:
         while True:
@@ -143,13 +153,25 @@ async def run_bridge(server_url: str, pairing_code: str, width: int, height: int
 
 def main():
     parser = argparse.ArgumentParser(description="LensLink Windows Virtual Camera Bridge")
-    parser.add_argument("--code", required=True, help="6-character pairing code shown in LensLink PC Receiver")
+    parser.add_argument("--code", required=False, help="6-character pairing code shown in LensLink PC Receiver")
     parser.add_argument("--server", default="ws://127.0.0.1:3000", help="LensLink server URL (ws:// or wss://)")
     parser.add_argument("--width", type=int, default=1280, help="Virtual camera output width")
     parser.add_argument("--height", type=int, default=720, help="Virtual camera output height")
     parser.add_argument("--fps", type=int, default=30, help="Virtual camera target frame rate")
-    parser.add_argument("--backend", default=None, help="Optional pyvirtualcam backend (obs or unitycapture)")
+    parser.add_argument("--backend", default=None, help="Optional pyvirtualcam backend (unitycapture or obs)")
+    parser.add_argument("--check-driver", action="store_true", help="Verify a virtual camera driver is registered and exit")
     args = parser.parse_args()
+
+    if args.check_driver:
+        try:
+            cam = open_virtual_camera(640, 480, 30, args.backend)
+            cam.close()
+            sys.exit(0)
+        except Exception:
+            sys.exit(1)
+
+    if not args.code:
+        parser.error("--code is required unless --check-driver is used")
 
     try:
         asyncio.run(run_bridge(args.server, args.code, args.width, args.height, args.fps, args.backend))

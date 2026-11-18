@@ -1,13 +1,17 @@
 import { useState } from 'react';
 import {
   Check,
+  ChevronDown,
+  ChevronUp,
   Copy,
   Download,
   ExternalLink,
+  Globe,
   MonitorPlay,
   Radio,
   Terminal,
 } from 'lucide-react';
+import { downloadBundle } from '../../lib/download';
 
 interface VirtualCamPanelProps {
   pairCode: string;
@@ -35,6 +39,11 @@ export function VirtualCamPanel({
   const [copiedUrl, setCopiedUrl] = useState(false);
   const [copiedFrameUrl, setCopiedFrameUrl] = useState(false);
   const [copiedCmd, setCopiedCmd] = useState(false);
+  const [downloadingBrowserExt, setDownloadingBrowserExt] = useState(false);
+  const [browserExtError, setBrowserExtError] = useState<string | null>(null);
+  const [downloadingBridge, setDownloadingBridge] = useState(false);
+  const [bridgeDownloadError, setBridgeDownloadError] = useState<string | null>(null);
+  const [showOptionalObs, setShowOptionalObs] = useState(false);
 
   const wsOrigin = window.location.origin
     .replace(/^https:\/\//i, 'wss://')
@@ -43,7 +52,8 @@ export function VirtualCamPanel({
   const chromelessUrl = `${window.location.origin}/?mode=vcam&pair=${pairCode}`;
   const frameModeUrl = `${chromelessUrl}&transport=frames`;
   const cliCommand = `python lenslink_vcam.py --code ${pairCode} --server ${wsOrigin}`;
-  const bundleDownloadUrl = `/api/virtual-cam/bundle?origin=${encodeURIComponent(window.location.origin)}`;
+  const browserBundleUrl = `/api/browser-cam/bundle?origin=${encodeURIComponent(window.location.origin)}`;
+  const windowsBundleUrl = `/api/virtual-cam/bundle?origin=${encodeURIComponent(window.location.origin)}`;
 
   const handleCopyUrl = async () => {
     try {
@@ -80,10 +90,10 @@ export function VirtualCamPanel({
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 pb-5 border-b border-slate-200">
         <div>
           <h2 className="text-xl font-semibold text-slate-900">
-            Windows Virtual Webcam Component
+            Virtual Webcam (No OBS Studio Required)
           </h2>
           <p className="text-sm text-slate-600 mt-1">
-            Expose your smartphone feed as a standard camera device in Zoom, Google Meet, Microsoft Teams, and OBS Studio.
+            Use your paired smartphone directly as a webcam in Google Meet, Zoom, Microsoft Teams, BIS Hallmarking portals, and Windows apps without OBS Studio or third-party suites.
           </p>
         </div>
 
@@ -102,17 +112,104 @@ export function VirtualCamPanel({
         </div>
       </div>
 
-      {/* Live Output Status Summary */}
+      {/* Primary No-OBS Virtual Webcam Options */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        {/* Option 1: Direct Windows Virtual Camera Driver Bridge */}
+        {/* Option 1: Standalone Browser Virtual Webcam Extension */}
         <section className="p-6 rounded-xl bg-white border border-slate-200 space-y-5">
           <div className="flex items-start justify-between gap-4">
             <div className="space-y-1">
+              <div className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-blue-700">
+                <Globe className="w-3.5 h-3.5" />
+                <span>Recommended — Zero Python &amp; Zero Drivers</span>
+              </div>
               <h3 className="text-base font-semibold text-slate-900">
-                01. Windows DirectShow Bridge
+                01. Browser Virtual Webcam Extension
               </h3>
               <p className="text-sm text-slate-600">
-                Streams frames directly to the Windows Virtual Camera driver via our lightweight local Python bridge.
+                Adds <span className="font-semibold text-slate-800">LensLink Wireless Camera</span> directly inside Chrome &amp; Microsoft Edge for Google Meet, Zoom Web, Teams Web, and BIS portals.
+              </p>
+            </div>
+            <span className="text-xs font-mono tabular-nums text-slate-500 whitespace-nowrap">
+              {vcamBridgeCount > 0 ? `${vcamBridgeCount} active` : 'Ready'}
+            </span>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              disabled={downloadingBrowserExt}
+              onClick={async () => {
+                setDownloadingBrowserExt(true);
+                setBrowserExtError(null);
+                const result = await downloadBundle(
+                  browserBundleUrl,
+                  'lenslink-browser-webcam.zip'
+                );
+                setDownloadingBrowserExt(false);
+                if (!result.ok) {
+                  setBrowserExtError(result.error || 'Download failed.');
+                }
+              }}
+              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white text-xs font-semibold transition-colors whitespace-nowrap"
+            >
+              <Download className="w-4 h-4" />
+              <span>
+                {downloadingBrowserExt
+                  ? 'Preparing .zip...'
+                  : 'Download Browser Extension (.zip)'}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={onToggleBridgeStream}
+              disabled={!isLiveConnected && !bridgeStreamEnabled}
+              className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-lg text-xs font-semibold border transition-colors whitespace-nowrap disabled:opacity-45 disabled:pointer-events-none ${
+                bridgeStreamEnabled
+                  ? 'bg-slate-900 border-slate-900 text-white hover:bg-slate-800'
+                  : 'bg-white border-slate-300 text-slate-800 hover:bg-slate-50'
+              }`}
+            >
+              <Radio className="w-4 h-4" />
+              <span>
+                {bridgeStreamEnabled ? 'Frame Relay: Active' : 'Enable Frame Relay'}
+              </span>
+            </button>
+          </div>
+
+          {browserExtError && (
+            <p className="text-xs text-red-600 leading-relaxed">{browserExtError}</p>
+          )}
+
+          <ol className="space-y-1.5 text-xs text-slate-600 list-decimal list-inside pt-1 leading-relaxed">
+            <li>
+              Extract <span className="font-mono text-slate-800">lenslink-browser-webcam.zip</span> on your PC.
+            </li>
+            <li>
+              Open <span className="font-mono text-slate-800">chrome://extensions</span> (or{' '}
+              <span className="font-mono text-slate-800">edge://extensions</span>), enable{' '}
+              <strong className="text-slate-800">Developer mode</strong>, click{' '}
+              <strong className="text-slate-800">Load unpacked</strong>, and select the extracted folder.
+            </li>
+            <li>
+              Keep this tab open (auto-syncs code <span className="font-mono font-semibold text-slate-900">{pairCode}</span>), then pick{' '}
+              <strong className="text-slate-800">LensLink Wireless Camera</strong> in any website&apos;s camera selector.
+            </li>
+          </ol>
+        </section>
+
+        {/* Option 2: Standalone Windows DirectShow Driver & Bridge (No OBS) */}
+        <section className="p-6 rounded-xl bg-white border border-slate-200 space-y-5">
+          <div className="flex items-start justify-between gap-4">
+            <div className="space-y-1">
+              <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                For Desktop Apps (Zoom.exe, Teams.exe, Windows Camera)
+              </div>
+              <h3 className="text-base font-semibold text-slate-900">
+                02. Windows DirectShow Driver (No OBS)
+              </h3>
+              <p className="text-sm text-slate-600">
+                Registers a standalone Windows DirectShow virtual camera driver (<span className="font-mono text-slate-800">Unity Video Capture</span>) without installing OBS Studio.
               </p>
             </div>
             <span className="text-xs font-mono tabular-nums text-slate-500 whitespace-nowrap">
@@ -121,37 +218,50 @@ export function VirtualCamPanel({
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
-            <a
-              href={bundleDownloadUrl}
-              download="lenslink-windows-vcam.zip"
-              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold transition-colors whitespace-nowrap"
-            >
-              <Download className="w-4 h-4" />
-              <span>Download Windows Bridge (.zip)</span>
-            </a>
-
             <button
               type="button"
-              onClick={onToggleBridgeStream}
-              disabled={!isLiveConnected && !bridgeStreamEnabled}
-              className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-lg text-xs font-semibold border transition-colors whitespace-nowrap disabled:opacity-45 disabled:pointer-events-none ${
-                bridgeStreamEnabled
-                  ? 'bg-blue-600 border-blue-600 text-white hover:bg-blue-700'
-                  : 'bg-white border-slate-300 text-slate-800 hover:bg-slate-50'
-              }`}
+              disabled={downloadingBridge}
+              onClick={async () => {
+                setDownloadingBridge(true);
+                setBridgeDownloadError(null);
+                const result = await downloadBundle(
+                  windowsBundleUrl,
+                  'lenslink-windows-vcam.zip'
+                );
+                setDownloadingBridge(false);
+                if (!result.ok) {
+                  setBridgeDownloadError(result.error || 'Download failed.');
+                }
+              }}
+              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-slate-900 hover:bg-slate-800 disabled:opacity-60 text-white text-xs font-semibold transition-colors whitespace-nowrap"
             >
-              <Radio className="w-4 h-4" />
+              <Download className="w-4 h-4" />
               <span>
-                {bridgeStreamEnabled ? 'Bridge Frame Relay: Active' : 'Enable Bridge Frame Relay'}
+                {downloadingBridge
+                  ? 'Preparing .zip...'
+                  : 'Download Windows Driver + Bridge (.zip)'}
               </span>
             </button>
           </div>
 
-          <div className="pt-2 space-y-2">
-            <div className="flex items-center justify-between text-xs text-slate-500">
+          {bridgeDownloadError && (
+            <p className="text-xs text-red-600 leading-relaxed">{bridgeDownloadError}</p>
+          )}
+
+          <div className="pt-1 space-y-2">
+            <ol className="space-y-1 text-xs text-slate-600 list-decimal list-inside leading-relaxed">
+              <li>
+                Run <span className="font-mono text-slate-800">Install_Driver_No_OBS.bat</span> once to register the standalone DirectShow camera filter.
+              </li>
+              <li>
+                Run <span className="font-mono text-slate-800">start_virtual_cam.bat</span> (Python 3.10+) or use the launch command below:
+              </li>
+            </ol>
+
+            <div className="flex items-center justify-between text-xs text-slate-500 pt-1">
               <span className="flex items-center gap-1.5 font-medium">
                 <Terminal className="w-3.5 h-3.5" />
-                <span>Quick Launch Command (inside extracted folder)</span>
+                <span>Quick Launch Command</span>
               </span>
               <button
                 type="button"
@@ -165,102 +275,98 @@ export function VirtualCamPanel({
             <pre className="p-3 rounded-lg bg-slate-950 text-slate-100 font-mono text-xs overflow-x-auto tabular-nums">
               {cliCommand}
             </pre>
-            <p className="text-xs text-slate-500 leading-relaxed">
-              Requires OBS Studio (v26+ virtual camera driver) or Unity Capture installed on Windows, plus Python 3.10+. Keep this PC Receiver window unminimized while streaming.
-            </p>
-          </div>
-        </section>
-
-        {/* Option 2: Zero-Install OBS Virtual Camera Browser Source */}
-        <section className="p-6 rounded-xl bg-white border border-slate-200 space-y-5">
-          <div className="flex items-start justify-between gap-4">
-            <div className="space-y-1">
-              <h3 className="text-base font-semibold text-slate-900">
-                02. OBS Virtual Camera Output
-              </h3>
-              <p className="text-sm text-slate-600">
-                Zero-Python setup. Paste the chromeless feed URL into an OBS Browser Source and click Start Virtual Camera.
-              </p>
-            </div>
-            <span className="text-xs font-mono tabular-nums text-slate-500 whitespace-nowrap">
-              {vcamWebCount > 0
-                ? `${vcamWebCount} active${vcamWebFrameCount > 0 ? ' (frame relay)' : ''}`
-                : 'Idle'}
-            </span>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-3">
-            <a
-              href={chromelessUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold transition-colors whitespace-nowrap"
-            >
-              <MonitorPlay className="w-4 h-4" />
-              <span>Open Chromeless Feed</span>
-              <ExternalLink className="w-3.5 h-3.5" />
-            </a>
-
-            <button
-              type="button"
-              onClick={handleCopyUrl}
-              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-white hover:bg-slate-50 text-slate-800 border border-slate-300 text-xs font-semibold transition-colors whitespace-nowrap"
-            >
-              {copiedUrl ? <Check className="w-4 h-4 text-emerald-600" /> : <Copy className="w-4 h-4" />}
-              <span>{copiedUrl ? 'Copied OBS URL' : 'Copy Browser Source URL'}</span>
-            </button>
-          </div>
-
-          <div className="pt-2 space-y-2.5">
-            <span className="block text-xs font-medium text-slate-500">
-              Chromeless OBS Browser Source URL (auto WebRTC + frame fallback)
-            </span>
-            <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 font-mono text-xs text-slate-700 truncate">
-              {chromelessUrl}
-            </div>
-            <div className="flex items-center justify-between gap-2 text-xs text-slate-500">
-              <span>If OBS firewall blocks WebRTC, use Direct Frame URL:</span>
-              <button
-                type="button"
-                onClick={handleCopyFrameUrl}
-                className="inline-flex items-center gap-1 text-blue-600 hover:text-blue-700 font-medium whitespace-nowrap shrink-0"
-              >
-                {copiedFrameUrl ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                <span>{copiedFrameUrl ? 'Copied Frame URL' : 'Copy Frame Mode URL'}</span>
-              </button>
-            </div>
-            <p className="text-xs text-slate-500 leading-relaxed">
-              In OBS Studio: Add <strong className="font-semibold text-slate-700">Browser Source</strong> → set 1280×720 or 1920×1080 → keep this PC Receiver window open (not minimized) → click <strong className="font-semibold text-slate-700">Start Virtual Camera</strong>.
-            </p>
           </div>
         </section>
       </div>
 
-      {/* Video Conferencing App Selection Guide */}
+      {/* Camera Selection Guide */}
       <section className="p-6 rounded-xl bg-white border border-slate-200">
         <h3 className="text-sm font-semibold text-slate-900 mb-4">
-          Selecting the Virtual Webcam in Conferencing Apps
+          Selecting the Virtual Webcam in Your Apps
         </h3>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 text-sm">
           <div className="space-y-1">
-            <div className="font-semibold text-slate-900">Zoom</div>
+            <div className="font-semibold text-slate-900">Google Meet &amp; BIS Portals</div>
             <p className="text-xs text-slate-600 leading-relaxed">
-              Open Settings → Video → Camera dropdown, then select <span className="font-mono text-slate-800">OBS Virtual Camera</span>.
+              With the Browser Extension installed, pick <span className="font-mono text-slate-800">LensLink Wireless Camera</span> (or enable <em>Set as Default Camera</em> in the extension popup).
             </p>
           </div>
           <div className="space-y-1">
-            <div className="font-semibold text-slate-900">Google Meet</div>
+            <div className="font-semibold text-slate-900">Zoom (Web &amp; Desktop)</div>
             <p className="text-xs text-slate-600 leading-relaxed">
-              Click More options (⋮) → Settings → Video → Camera, then select <span className="font-mono text-slate-800">OBS Virtual Camera</span>.
+              In Settings → Video → Camera, choose <span className="font-mono text-slate-800">LensLink Wireless Camera</span> (Web) or <span className="font-mono text-slate-800">Unity Video Capture</span> (Desktop).
             </p>
           </div>
           <div className="space-y-1">
-            <div className="font-semibold text-slate-900">Microsoft Teams</div>
+            <div className="font-semibold text-slate-900">Microsoft Teams &amp; Discord</div>
             <p className="text-xs text-slate-600 leading-relaxed">
-              Open Settings → Devices → Camera, then choose <span className="font-mono text-slate-800">OBS Virtual Camera</span>.
+              Open Settings → Devices → Camera, then select <span className="font-mono text-slate-800">LensLink Wireless Camera</span> or <span className="font-mono text-slate-800">Unity Video Capture</span>.
             </p>
           </div>
         </div>
+      </section>
+
+      {/* Optional Chromeless / OBS Studio Browser Source (Collapsed by Default) */}
+      <section className="rounded-xl bg-white border border-slate-200 overflow-hidden">
+        <button
+          type="button"
+          onClick={() => setShowOptionalObs((prev) => !prev)}
+          className="w-full px-6 py-4 flex items-center justify-between text-left hover:bg-slate-50 transition-colors"
+        >
+          <div>
+            <div className="text-sm font-semibold text-slate-900">
+              Optional: Chromeless Feed URL (for OBS Studio Users Only)
+            </div>
+            <div className="text-xs text-slate-500 mt-0.5">
+              Not required unless you want to composite scenes inside OBS Studio.
+              {vcamWebCount > 0 &&
+                ` • ${vcamWebCount} active${vcamWebFrameCount > 0 ? ' (frame relay)' : ''}`}
+            </div>
+          </div>
+          {showOptionalObs ? (
+            <ChevronUp className="w-4 h-4 text-slate-500 shrink-0" />
+          ) : (
+            <ChevronDown className="w-4 h-4 text-slate-500 shrink-0" />
+          )}
+        </button>
+
+        {showOptionalObs && (
+          <div className="px-6 pb-6 pt-2 border-t border-slate-100 space-y-4">
+            <div className="flex flex-wrap items-center gap-3">
+              <a
+                href={chromelessUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold transition-colors whitespace-nowrap"
+              >
+                <MonitorPlay className="w-4 h-4" />
+                <span>Open Chromeless Feed</span>
+                <ExternalLink className="w-3.5 h-3.5" />
+              </a>
+
+              <button
+                type="button"
+                onClick={handleCopyUrl}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-white hover:bg-slate-50 text-slate-800 border border-slate-300 text-xs font-semibold transition-colors whitespace-nowrap"
+              >
+                {copiedUrl ? <Check className="w-4 h-4 text-emerald-600" /> : <Copy className="w-4 h-4" />}
+                <span>{copiedUrl ? 'Copied URL' : 'Copy Chromeless URL'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleCopyFrameUrl}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-white hover:bg-slate-50 text-slate-800 border border-slate-300 text-xs font-semibold transition-colors whitespace-nowrap"
+              >
+                {copiedFrameUrl ? <Check className="w-4 h-4 text-emerald-600" /> : <Copy className="w-4 h-4" />}
+                <span>{copiedFrameUrl ? 'Copied Frame URL' : 'Copy Frame Mode URL'}</span>
+              </button>
+            </div>
+            <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 font-mono text-xs text-slate-700 truncate">
+              {chromelessUrl}
+            </div>
+          </div>
+        )}
       </section>
     </div>
   );
