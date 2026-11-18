@@ -2,6 +2,8 @@ import {
   CameraCapabilities,
   CameraDeviceSummary,
   CameraSettings,
+  CaptureCategory,
+  CapturedPhoto,
   RESOLUTION_DIMENSIONS,
   StreamStats,
 } from '../types/lenslink';
@@ -43,7 +45,7 @@ export function getRtcConfiguration(localOnly: boolean): RTCConfiguration {
 }
 
 export function buildMediaConstraints(settings: CameraSettings): MediaStreamConstraints {
-  const dims = RESOLUTION_DIMENSIONS[settings.resolution] || RESOLUTION_DIMENSIONS['720p'];
+  const dims = RESOLUTION_DIMENSIONS[settings.resolution] || RESOLUTION_DIMENSIONS['1080p'];
   const videoConstraints: MediaTrackConstraints = {
     width: { ideal: dims.width },
     height: { ideal: dims.height },
@@ -74,7 +76,6 @@ export async function getCameraStreamSafe(
   try {
     return await navigator.mediaDevices.getUserMedia(buildMediaConstraints(settings));
   } catch (err) {
-    // Fallback for strict iOS/Android devices rejecting resolution/framerate combinations
     const fallbackConstraints: MediaStreamConstraints = {
       audio: false,
       video: settings.deviceId
@@ -89,17 +90,78 @@ export async function getCameraStreamSafe(
   }
 }
 
+function classifyCameraDevice(rawLabel: string, index: number): Omit<CameraDeviceSummary, 'deviceId'> {
+  const label = rawLabel || `Camera ${index + 1}`;
+  const lower = label.toLowerCase();
+
+  const isFront =
+    lower.includes('front') ||
+    lower.includes('facing front') ||
+    lower.includes('facetime') ||
+    lower.includes('selfie') ||
+    lower.includes('user');
+  const isBack =
+    lower.includes('back') ||
+    lower.includes('rear') ||
+    lower.includes('environment') ||
+    lower.includes('facing back');
+
+  const facing: 'back' | 'front' | 'unknown' = isFront
+    ? 'front'
+    : isBack
+      ? 'back'
+      : 'unknown';
+
+  let shortLabel = label;
+  if (lower.includes('ultra') && lower.includes('wide')) {
+    shortLabel = isBack ? 'Rear Ultra-Wide' : 'Ultra-Wide';
+  } else if (lower.includes('macro')) {
+    shortLabel = 'Rear Macro';
+  } else if (lower.includes('telephoto') || lower.includes('tele')) {
+    shortLabel = 'Rear Telephoto';
+  } else if (lower.includes('triple')) {
+    shortLabel = 'Rear Triple';
+  } else if (lower.includes('dual wide')) {
+    shortLabel = 'Rear Dual Wide';
+  } else if (lower.includes('dual')) {
+    shortLabel = 'Rear Dual';
+  } else if (isBack && lower.includes('wide')) {
+    shortLabel = 'Rear Main';
+  } else if (isBack) {
+    // Distinguish Android camera2 0/2/etc.
+    const camNumMatch = lower.match(/camera2?\s*(\d+)/i);
+    if (camNumMatch) {
+      const idx = Number(camNumMatch[1]);
+      shortLabel = idx === 0 ? 'Rear Main' : `Rear Lens ${idx}`;
+    } else {
+      shortLabel = `Rear ${index + 1}`;
+    }
+  } else if (isFront) {
+    shortLabel = 'Front';
+  } else if (label.length > 18) {
+    shortLabel = `Lens ${index + 1}`;
+  }
+
+  return { label, shortLabel, facing };
+}
+
 export async function extractCameraCapabilities(
   track: MediaStreamTrack
 ): Promise<CameraCapabilities> {
   let devices: CameraDeviceSummary[] = [];
   try {
     const rawDevices = await navigator.mediaDevices.enumerateDevices();
+    const seen = new Set<string>();
     devices = rawDevices
-      .filter((d) => d.kind === 'videoinput')
+      .filter((d) => d.kind === 'videoinput' && d.deviceId)
+      .filter((d) => {
+        if (seen.has(d.deviceId)) return false;
+        seen.add(d.deviceId);
+        return true;
+      })
       .map((d, index) => ({
         deviceId: d.deviceId,
-        label: d.label || `Camera ${index + 1}`,
+        ...classifyCameraDevice(d.label, index),
       }));
   } catch {
     devices = [];
@@ -126,11 +188,49 @@ export async function extractCameraCapabilities(
       };
     }
 
+    if (isRangeCap(raw.brightness)) {
+      capabilities.brightness = {
+        min: raw.brightness.min,
+        max: raw.brightness.max,
+        step: raw.brightness.step || 1,
+      };
+    }
+
+    if (isRangeCap(raw.contrast)) {
+      capabilities.contrast = {
+        min: raw.contrast.min,
+        max: raw.contrast.max,
+        step: raw.contrast.step || 1,
+      };
+    }
+
+    if (isRangeCap(raw.sharpness)) {
+      capabilities.sharpness = {
+        min: raw.sharpness.min,
+        max: raw.sharpness.max,
+        step: raw.sharpness.step || 1,
+      };
+    }
+
+    if (isRangeCap(raw.colorTemperature)) {
+      capabilities.colorTemperature = {
+        min: raw.colorTemperature.min,
+        max: raw.colorTemperature.max,
+        step: raw.colorTemperature.step || 100,
+      };
+    }
+
+    if (Array.isArray(raw.whiteBalanceMode)) {
+      capabilities.whiteBalanceModes = raw.whiteBalanceMode.filter(
+        (m): m is string => typeof m === 'string'
+      );
+    }
+
     if (isRangeCap(raw.focusDistance)) {
       capabilities.focusDistance = {
         min: raw.focusDistance.min,
         max: raw.focusDistance.max,
-        step: raw.focusDistance.step || 0.05,
+        step: raw.focusDistance.step || 0.02,
       };
     }
 
@@ -165,6 +265,17 @@ function isRangeCap(val: unknown): val is { min: number; max: number; step?: num
   );
 }
 
+function mapNormalizedToRange(
+  normalizedPercent: number,
+  minVal: number,
+  maxVal: number,
+  range: { min: number; max: number }
+): number {
+  const t = (normalizedPercent - minVal) / (maxVal - minVal);
+  const clampedT = Math.min(1, Math.max(0, t));
+  return range.min + (range.max - range.min) * clampedT;
+}
+
 export async function applyHardwareConstraints(
   track: MediaStreamTrack | null | undefined,
   patch: Partial<CameraSettings>
@@ -195,7 +306,8 @@ export async function applyHardwareConstraints(
   if (typeof patch.focusDistance === 'number' && isRangeCap(caps.focusDistance)) {
     const mapped =
       caps.focusDistance.min +
-      (caps.focusDistance.max - caps.focusDistance.min) * Math.min(1, Math.max(0, patch.focusDistance));
+      (caps.focusDistance.max - caps.focusDistance.min) *
+        Math.min(1, Math.max(0, patch.focusDistance));
     advanced.focusDistance = mapped;
   }
 
@@ -203,6 +315,31 @@ export async function applyHardwareConstraints(
     advanced.exposureCompensation = Math.min(
       caps.exposureCompensation.max,
       Math.max(caps.exposureCompensation.min, patch.exposureCompensation)
+    );
+  }
+
+  if (typeof patch.brightness === 'number' && isRangeCap(caps.brightness)) {
+    advanced.brightness = mapNormalizedToRange(patch.brightness, -50, 50, caps.brightness);
+  }
+
+  if (typeof patch.contrast === 'number' && isRangeCap(caps.contrast)) {
+    advanced.contrast = mapNormalizedToRange(patch.contrast, -50, 100, caps.contrast);
+  }
+
+  if (typeof patch.sharpness === 'number' && isRangeCap(caps.sharpness)) {
+    advanced.sharpness = mapNormalizedToRange(patch.sharpness, 0, 100, caps.sharpness);
+  }
+
+  if (patch.whiteBalanceMode && Array.isArray(caps.whiteBalanceMode)) {
+    if (caps.whiteBalanceMode.includes(patch.whiteBalanceMode)) {
+      advanced.whiteBalanceMode = patch.whiteBalanceMode;
+    }
+  }
+
+  if (typeof patch.colorTemperature === 'number' && isRangeCap(caps.colorTemperature)) {
+    advanced.colorTemperature = Math.min(
+      caps.colorTemperature.max,
+      Math.max(caps.colorTemperature.min, patch.colorTemperature)
     );
   }
 
@@ -216,9 +353,176 @@ export async function applyHardwareConstraints(
         advanced: [advanced as MediaTrackConstraintSet],
       });
     } catch {
-      // Some mobile browsers throw if an advanced constraint isn't allowed with current mode
+      // Some mobile browsers reject combined advanced constraints
     }
   }
+}
+
+export async function triggerTapAutoFocus(
+  track: MediaStreamTrack | null | undefined,
+  point?: { x: number; y: number }
+): Promise<boolean> {
+  if (!track || track.readyState !== 'live' || typeof track.applyConstraints !== 'function') {
+    return false;
+  }
+
+  const caps =
+    typeof track.getCapabilities === 'function'
+      ? (track.getCapabilities() as Record<string, unknown>)
+      : {};
+  const focusModes = Array.isArray(caps.focusMode) ? caps.focusMode : [];
+
+  try {
+    const advancedEntry: Record<string, unknown> = {};
+    if (point) {
+      advancedEntry.pointsOfInterest = [{ x: point.x, y: point.y }];
+    }
+
+    if (focusModes.includes('single-shot')) {
+      await track.applyConstraints({
+        advanced: [{ ...advancedEntry, focusMode: 'single-shot' } as MediaTrackConstraintSet],
+      });
+      if (focusModes.includes('continuous')) {
+        window.setTimeout(() => {
+          void track
+            .applyConstraints({
+              advanced: [{ focusMode: 'continuous' } as MediaTrackConstraintSet],
+            })
+            .catch(() => {});
+        }, 450);
+      }
+      return true;
+    }
+
+    if (focusModes.includes('continuous')) {
+      await track.applyConstraints({
+        advanced: [{ ...advancedEntry, focusMode: 'continuous' } as MediaTrackConstraintSet],
+      });
+      return true;
+    }
+  } catch {
+    // Graceful fallback when browser doesn't support pointsOfInterest
+    if (focusModes.includes('continuous')) {
+      try {
+        await track.applyConstraints({
+          advanced: [{ focusMode: 'continuous' } as MediaTrackConstraintSet],
+        });
+        return true;
+      } catch {
+        return false;
+      }
+    }
+  }
+  return false;
+}
+
+export function buildVideoFilterCss(
+  settings: CameraSettings,
+  hardwareBrightnessActive: boolean,
+  hardwareContrastActive: boolean
+): string | undefined {
+  const filters: string[] = [];
+
+  if (!hardwareBrightnessActive && settings.brightness !== 0) {
+    const b = Math.max(0.4, 1 + settings.brightness / 100);
+    filters.push(`brightness(${b.toFixed(2)})`);
+  }
+
+  if (!hardwareContrastActive && settings.contrast !== 0) {
+    const c = Math.max(0.4, 1 + settings.contrast / 100);
+    filters.push(`contrast(${c.toFixed(2)})`);
+  }
+
+  if (settings.grayscale) {
+    filters.push('grayscale(1)');
+  }
+
+  return filters.length > 0 ? filters.join(' ') : undefined;
+}
+
+export async function captureProcessedPhoto(options: {
+  video: HTMLVideoElement;
+  track?: MediaStreamTrack | null;
+  settings: CameraSettings;
+  category: CaptureCategory;
+  lensLabel: string;
+  hardwareBrightnessActive: boolean;
+  hardwareContrastActive: boolean;
+}): Promise<CapturedPhoto | null> {
+  const {
+    video,
+    track,
+    settings,
+    category,
+    lensLabel,
+    hardwareBrightnessActive,
+    hardwareContrastActive,
+  } = options;
+
+  const digitalZoom = Math.max(1, settings.digitalZoom || 1);
+  const filterCss = buildVideoFilterCss(
+    settings,
+    hardwareBrightnessActive,
+    hardwareContrastActive
+  );
+
+  let sourceImage: CanvasImageSource = video;
+  let srcW = video.videoWidth || 1920;
+  let srcH = video.videoHeight || 1080;
+
+  // Use native full-sensor ImageCapture.takePhoto() when available on Android Chrome
+  const win = window as unknown as {
+    ImageCapture?: new (track: MediaStreamTrack) => { takePhoto: () => Promise<Blob> };
+  };
+  if (track && win.ImageCapture && digitalZoom === 1 && !filterCss && !settings.mirror) {
+    try {
+      const imageCapture = new win.ImageCapture(track);
+      const blob = await imageCapture.takePhoto();
+      const bitmap = await createImageBitmap(blob);
+      sourceImage = bitmap;
+      srcW = bitmap.width;
+      srcH = bitmap.height;
+    } catch {
+      // Fallback to live video frame capture
+    }
+  }
+
+  if (srcW === 0 || srcH === 0) return null;
+
+  const cropW = Math.round(srcW / digitalZoom);
+  const cropH = Math.round(srcH / digitalZoom);
+  const cropX = Math.round((srcW - cropW) / 2);
+  const cropY = Math.round((srcH - cropH) / 2);
+
+  const canvas = document.createElement('canvas');
+  canvas.width = srcW;
+  canvas.height = srcH;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+
+  ctx.save();
+  if (settings.mirror) {
+    ctx.translate(srcW, 0);
+    ctx.scale(-1, 1);
+  }
+  if (filterCss) {
+    ctx.filter = filterCss;
+  }
+  ctx.drawImage(sourceImage, cropX, cropY, cropW, cropH, 0, 0, srcW, srcH);
+  ctx.restore();
+
+  const dataUrl = canvas.toDataURL('image/jpeg', 0.94);
+
+  return {
+    id: `${category}-${Date.now()}`,
+    category,
+    dataUrl,
+    width: srcW,
+    height: srcH,
+    capturedAt: new Date().toISOString(),
+    lensLabel,
+    zoom: Number((settings.zoom * digitalZoom).toFixed(1)),
+  };
 }
 
 export async function tuneVideoSender(
@@ -233,13 +537,13 @@ export async function tuneVideoSender(
     }
     const maxBitrate =
       settings.resolution === '1080p'
-        ? 4_500_000
+        ? 5_000_000
         : settings.resolution === '720p'
-          ? 2_500_000
+          ? 2_800_000
           : 1_200_000;
     params.encodings[0].maxBitrate = maxBitrate;
     params.encodings[0].maxFramerate = settings.frameRate;
-    params.degradationPreference = 'maintain-framerate';
+    params.degradationPreference = 'maintain-resolution';
     await sender.setParameters(params);
   } catch {
     // Ignore on browsers that don't allow dynamic sender parameters

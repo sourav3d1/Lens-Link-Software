@@ -28,6 +28,8 @@ interface SocketMeta {
 
 interface RoomState {
   code: string;
+  sessionToken: string | null;
+  pcName: string;
   pc: SocketMeta | null;
   phone: SocketMeta | null;
   vcamBridges: Set<SocketMeta>;
@@ -57,6 +59,8 @@ function createEmptyRoom(code: string): RoomState {
   const now = Date.now();
   return {
     code,
+    sessionToken: null,
+    pcName: 'PC Workstation',
     pc: null,
     phone: null,
     vcamBridges: new Set<SocketMeta>(),
@@ -85,6 +89,7 @@ function broadcastRoomStatus(room: RoomState) {
     vcamWebCount: room.vcamWebClients.size,
     vcamWebPeerIds: Array.from(room.vcamWebClients.keys()),
     phoneName: room.phoneName || undefined,
+    pcName: room.pcName,
     capabilities: room.capabilities,
     settings: room.settings,
   };
@@ -290,6 +295,104 @@ async function startServer() {
     res.send(zipBuffer);
   });
 
+  app.get('/api/pc-app/bundle', (req, res) => {
+    const rawOrigin = typeof req.query.origin === 'string' ? req.query.origin.trim() : '';
+    let appOrigin = rawOrigin;
+    if (!/^https?:\/\/[^/]+$/i.test(appOrigin)) {
+      const proto = req.headers['x-forwarded-proto'] === 'https' || req.secure ? 'https' : 'http';
+      appOrigin = `${proto}://${req.headers.host || `localhost:${PORT}`}`;
+    }
+    const launchUrl = `${appOrigin}/?mode=pc`;
+
+    const launchBat = [
+      '@echo off',
+      'setlocal',
+      `set "APP_URL=${launchUrl}"`,
+      'echo Launching LensLink PC Receiver...',
+      'where msedge >nul 2>nul && (start "" msedge --app="%APP_URL%" --new-window && exit /b 0)',
+      'if exist "%ProgramFiles(x86)%\\Microsoft\\Edge\\Application\\msedge.exe" (start "" "%ProgramFiles(x86)%\\Microsoft\\Edge\\Application\\msedge.exe" --app="%APP_URL%" --new-window && exit /b 0)',
+      'if exist "%ProgramFiles%\\Microsoft\\Edge\\Application\\msedge.exe" (start "" "%ProgramFiles%\\Microsoft\\Edge\\Application\\msedge.exe" --app="%APP_URL%" --new-window && exit /b 0)',
+      'if exist "%ProgramFiles%\\Google\\Chrome\\Application\\chrome.exe" (start "" "%ProgramFiles%\\Google\\Chrome\\Application\\chrome.exe" --app="%APP_URL%" --new-window && exit /b 0)',
+      'if exist "%ProgramFiles(x86)%\\Google\\Chrome\\Application\\chrome.exe" (start "" "%ProgramFiles(x86)%\\Google\\Chrome\\Application\\chrome.exe" --app="%APP_URL%" --new-window && exit /b 0)',
+      'start "" "%APP_URL%"',
+      'exit /b 0',
+      '',
+    ].join('\r\n');
+
+    const installBat = [
+      '@echo off',
+      'setlocal',
+      `set "APP_URL=${launchUrl}"`,
+      'echo ==================================================',
+      'echo   LensLink PC Desktop Installer (Windows 10 / 11)',
+      'echo ==================================================',
+      'echo.',
+      'set "BROWSER_EXE="',
+      'if exist "%ProgramFiles(x86)%\\Microsoft\\Edge\\Application\\msedge.exe" set "BROWSER_EXE=%ProgramFiles(x86)%\\Microsoft\\Edge\\Application\\msedge.exe"',
+      'if not defined BROWSER_EXE if exist "%ProgramFiles%\\Microsoft\\Edge\\Application\\msedge.exe" set "BROWSER_EXE=%ProgramFiles%\\Microsoft\\Edge\\Application\\msedge.exe"',
+      'if not defined BROWSER_EXE if exist "%ProgramFiles%\\Google\\Chrome\\Application\\chrome.exe" set "BROWSER_EXE=%ProgramFiles%\\Google\\Chrome\\Application\\chrome.exe"',
+      'if not defined BROWSER_EXE if exist "%ProgramFiles(x86)%\\Google\\Chrome\\Application\\chrome.exe" set "BROWSER_EXE=%ProgramFiles(x86)%\\Google\\Chrome\\Application\\chrome.exe"',
+      'if not defined BROWSER_EXE (',
+      '  echo Microsoft Edge or Google Chrome not found in default paths.',
+      '  echo Opening in your default browser instead...',
+      '  start "" "%APP_URL%"',
+      '  pause',
+      '  exit /b 0',
+      ')',
+      'echo Creating Desktop and Start Menu shortcuts for LensLink...',
+      'powershell -NoProfile -ExecutionPolicy Bypass -Command "$ws = New-Object -ComObject WScript.Shell; $desktop = [Environment]::GetFolderPath(\'Desktop\'); $startMenu = Join-Path ([Environment]::GetFolderPath(\'Programs\')) \'LensLink.lnk\'; foreach ($path in @((Join-Path $desktop \'LensLink.lnk\'), $startMenu)) { $s = $ws.CreateShortcut($path); $s.TargetPath = \'%BROWSER_EXE%\'; $s.Arguments = \'--app=%APP_URL% --new-window\'; $s.Description = \'LensLink Wireless Smartphone Webcam\'; $s.Save() }"',
+      'echo.',
+      'echo Shortcut installed! Launching LensLink PC Receiver...',
+      'start "" "%BROWSER_EXE%" --app="%APP_URL%" --new-window',
+      'exit /b 0',
+      '',
+    ].join('\r\n');
+
+    const readmeTxt = [
+      'LensLink PC Desktop Application (Windows 10 / 11)',
+      '==================================================',
+      '',
+      '1. Install Desktop Shortcut:',
+      '   Double-click Install_LensLink_Desktop.bat to add a LensLink icon',
+      '   to your Windows Desktop and Start Menu and launch it as a standalone app.',
+      '',
+      '2. Portable Quick Launch:',
+      '   Double-click Launch_LensLink.bat anytime to open a fresh session window.',
+      '',
+      '3. Multi-PC & Multi-Smartphone on the Same Wi-Fi:',
+      '   Each time LensLink opens on any PC, it generates a unique dynamic QR code',
+      '   and 6-character session code. Scan each PC\'s QR code with its paired',
+      '   smartphone so multiple workstations operate independently on the same Wi-Fi.',
+      '',
+      '4. Windows Virtual Webcam (Zoom / Teams / Google Meet):',
+      '   Open the included virtual-cam folder and run start_virtual_cam.bat',
+      '   (requires Python 3.10+ and OBS Virtual Camera or Unity Capture driver).',
+      '',
+    ].join('\r\n');
+
+    const files: Array<{ name: string; content: Buffer }> = [
+      { name: 'LensLink-PC/Install_LensLink_Desktop.bat', content: Buffer.from(installBat, 'utf8') },
+      { name: 'LensLink-PC/Launch_LensLink.bat', content: Buffer.from(launchBat, 'utf8') },
+      { name: 'LensLink-PC/README.txt', content: Buffer.from(readmeTxt, 'utf8') },
+    ];
+
+    const vcamDir = path.join(__dirname, 'windows-virtual-cam');
+    for (const fileName of ['lenslink_vcam.py', 'requirements.txt', 'start_virtual_cam.bat', 'README.md']) {
+      const fullPath = path.join(vcamDir, fileName);
+      if (fs.existsSync(fullPath)) {
+        files.push({
+          name: `LensLink-PC/virtual-cam/${fileName}`,
+          content: fs.readFileSync(fullPath),
+        });
+      }
+    }
+
+    const zipBuffer = buildZipBuffer(files);
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', 'attachment; filename="lenslink-pc-windows.zip"');
+    res.send(zipBuffer);
+  });
+
   const server = http.createServer(app);
   const wss = new WebSocketServer({ noServer: true });
 
@@ -413,18 +516,50 @@ async function startServer() {
       }
 
       if (type === 'room:create') {
-        const requestedCode =
+        const incomingSessionToken =
+          typeof msg.sessionToken === 'string' && msg.sessionToken.trim().length > 0
+            ? msg.sessionToken.trim()
+            : null;
+        const incomingPcName =
+          typeof msg.pcName === 'string' && msg.pcName.trim().length > 0
+            ? msg.pcName.trim().slice(0, 40)
+            : 'PC Workstation';
+
+        let targetCode =
           typeof msg.code === 'string' && /^[A-Z0-9]{6}$/i.test(msg.code.trim())
             ? msg.code.trim().toUpperCase()
             : generatePairingCode();
 
-        let room = rooms.get(requestedCode);
-        if (!room) {
-          room = createEmptyRoom(requestedCode);
-          rooms.set(requestedCode, room);
+        let room = rooms.get(targetCode);
+        // If another active PC session already owns this code, allocate a distinct code to avoid cross-PC collision
+        if (
+          room &&
+          room.pc &&
+          room.pc.ws.readyState === WebSocket.OPEN &&
+          room.pc.ws !== ws &&
+          (!incomingSessionToken || room.sessionToken !== incomingSessionToken)
+        ) {
+          targetCode = generatePairingCode();
+          room = undefined;
         }
-        attachClientToRoom(ws, 'pc', requestedCode);
-        sendJson(ws, { type: 'room:created', code: requestedCode });
+
+        if (!room) {
+          room = createEmptyRoom(targetCode);
+          rooms.set(targetCode, room);
+        }
+
+        if (incomingSessionToken) {
+          room.sessionToken = incomingSessionToken;
+        }
+        room.pcName = incomingPcName;
+
+        attachClientToRoom(ws, 'pc', targetCode);
+        sendJson(ws, {
+          type: 'room:created',
+          code: targetCode,
+          pcName: room.pcName,
+          sessionToken: room.sessionToken,
+        });
         return;
       }
 
@@ -488,6 +623,33 @@ async function startServer() {
         sendJson(target, {
           type: 'camera:stream-state',
           streaming: Boolean(msg.streaming),
+          from: senderMeta.role,
+        });
+        return;
+      }
+
+      if (type === 'camera:trigger-focus') {
+        sendJson(room.phone?.ws, {
+          type: 'camera:trigger-focus',
+          focusPoint: msg.focusPoint,
+          from: senderMeta.role,
+        });
+        return;
+      }
+
+      if (type === 'camera:request-capture') {
+        sendJson(room.phone?.ws, {
+          type: 'camera:request-capture',
+          captureCategory: msg.captureCategory,
+          from: senderMeta.role,
+        });
+        return;
+      }
+
+      if (type === 'camera:photo-captured') {
+        sendJson(room.pc?.ws, {
+          type: 'camera:photo-captured',
+          photo: msg.photo,
           from: senderMeta.role,
         });
         return;

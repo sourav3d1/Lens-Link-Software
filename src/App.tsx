@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { PcReceiverView } from './components/pc/PcReceiverView';
 import { PhoneCameraView } from './components/phone/PhoneCameraView';
 import { VirtualCamOutputView } from './components/vcam/VirtualCamOutputView';
+import { OfflineIndicator } from './components/common/PWAInstallButton';
 
 type AppMode = 'pc' | 'phone' | 'vcam';
 
@@ -35,28 +36,27 @@ export default function App() {
   const [mode, setMode] = useState<AppMode>(initial.mode);
   const [pairCode, setPairCode] = useState<string>(initial.pairCode);
 
-  if (mode === 'vcam') {
-    return <VirtualCamOutputView pairCode={pairCode} />;
-  }
-
-  if (mode === 'phone') {
-    return (
-      <PhoneCameraView
-        initialPairCode={pairCode}
-        onSwitchToPc={() => {
-          setMode('pc');
-          window.history.replaceState({}, '', '/?mode=pc');
-        }}
-      />
-    );
-  }
-
   return (
-    <PcReceiverView
-      onOpenPhoneMode={(code) => {
-        setPairCode(code);
-        setMode('phone');
-      }}
-    />
+    <>
+      {mode === 'vcam' ? (
+        <VirtualCamOutputView pairCode={pairCode} />
+      ) : mode === 'phone' ? (
+        <PhoneCameraView
+          initialPairCode={pairCode}
+          onSwitchToPc={() => {
+            setMode('pc');
+            window.history.replaceState({}, '', '/?mode=pc');
+          }}
+        />
+      ) : (
+        <PcReceiverView
+          onOpenPhoneMode={(code) => {
+            setPairCode(code);
+            setMode('phone');
+          }}
+        />
+      )}
+      <OfflineIndicator />
+    </>
   );
 }

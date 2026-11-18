@@ -9,6 +9,8 @@ export type ResolutionPreset = '480p' | '720p' | '1080p';
 export type FrameRatePreset = 15 | 24 | 30 | 60;
 export type CameraFacing = 'user' | 'environment';
 export type FocusMode = 'continuous' | 'manual';
+export type CaptureCategory = 'article' | 'huid';
+export type FramingGuide = 'none' | 'article' | 'huid';
 
 export interface CameraSettings {
   facingMode: CameraFacing;
@@ -16,10 +18,16 @@ export interface CameraSettings {
   resolution: ResolutionPreset;
   frameRate: FrameRatePreset;
   zoom: number;
+  digitalZoom: number;
   focusMode: FocusMode;
   focusDistance: number;
-  brightness: number; // -100 to +100 software/exposure adjustment (0 = neutral)
+  brightness: number; // -50 to +50 (0 = neutral)
+  contrast: number; // -50 to +100 (0 = neutral, 100 = 200% contrast)
+  sharpness: number; // 0 to 100 when hardware supported
+  grayscale: boolean;
   exposureCompensation: number; // hardware EV when supported
+  whiteBalanceMode: 'continuous' | 'manual';
+  colorTemperature: number;
   torch: boolean;
   mirror: boolean;
 }
@@ -27,6 +35,8 @@ export interface CameraSettings {
 export interface CameraDeviceSummary {
   deviceId: string;
   label: string;
+  shortLabel: string;
+  facing: 'back' | 'front' | 'unknown';
 }
 
 export interface RangeCapability {
@@ -39,12 +49,28 @@ export interface CameraCapabilities {
   devices: CameraDeviceSummary[];
   zoom?: RangeCapability;
   exposureCompensation?: RangeCapability;
+  brightness?: RangeCapability;
+  contrast?: RangeCapability;
+  sharpness?: RangeCapability;
+  colorTemperature?: RangeCapability;
+  whiteBalanceModes?: string[];
   focusDistance?: RangeCapability;
   focusModes?: string[];
   torch?: boolean;
   maxWidth?: number;
   maxHeight?: number;
   maxFrameRate?: number;
+}
+
+export interface CapturedPhoto {
+  id: string;
+  category: CaptureCategory;
+  dataUrl: string;
+  width: number;
+  height: number;
+  capturedAt: string;
+  lensLabel: string;
+  zoom: number;
 }
 
 export interface RoomStatusPayload {
@@ -56,6 +82,7 @@ export interface RoomStatusPayload {
   vcamWebCount: number;
   vcamWebPeerIds?: string[];
   phoneName?: string;
+  pcName?: string;
   capabilities?: CameraCapabilities | null;
   settings?: CameraSettings;
 }
@@ -75,10 +102,14 @@ export interface SignalingMessage {
     | 'camera:capabilities'
     | 'camera:settings'
     | 'camera:stream-state'
+    | 'camera:trigger-focus'
+    | 'camera:photo-captured'
+    | 'camera:request-capture'
     | 'vcam:bridge-toggle'
     | 'ping'
     | 'pong';
   code?: string;
+  sessionToken?: string;
   role?: 'pc' | 'phone' | 'vcam' | 'vcam-web';
   target?: 'pc' | 'phone' | 'vcam-web';
   from?: 'pc' | 'phone' | 'vcam-web';
@@ -90,12 +121,16 @@ export interface SignalingMessage {
   streaming?: boolean;
   enabled?: boolean;
   phoneName?: string;
+  pcName?: string;
   message?: string;
   pcOnline?: boolean;
   phoneOnline?: boolean;
   vcamBridgeCount?: number;
   vcamWebCount?: number;
   vcamWebPeerIds?: string[];
+  focusPoint?: { x: number; y: number };
+  photo?: CapturedPhoto;
+  captureCategory?: CaptureCategory;
 }
 
 export interface NetworkInfoResponse {
@@ -116,13 +151,19 @@ export interface StreamStats {
 
 export const DEFAULT_CAMERA_SETTINGS: CameraSettings = {
   facingMode: 'environment',
-  resolution: '720p',
+  resolution: '1080p',
   frameRate: 30,
   zoom: 1,
+  digitalZoom: 1,
   focusMode: 'continuous',
   focusDistance: 0.5,
   brightness: 0,
+  contrast: 0,
+  sharpness: 50,
+  grayscale: false,
   exposureCompensation: 0,
+  whiteBalanceMode: 'continuous',
+  colorTemperature: 4500,
   torch: false,
   mirror: false,
 };
