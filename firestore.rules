@@ -1,0 +1,136 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Safety Net: Default-deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string
+        && id.size() >= 1
+        && id.size() <= 128
+        && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isCanonicalBundleId(bundleId) {
+      return isValidId(bundleId)
+        && bundleId.matches('^(browser-webcam|windows-vcam|pc-windows|android-studio)$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isAdmin() {
+      return isVerifiedUser()
+        && (
+          exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+          || request.auth.token.email == 'sourav3d1@gmail.com'
+        );
+    }
+
+    function isValidDownloadBundle(data, bundleId) {
+      return data.keys().hasAll([
+          'bundleId',
+          'filename',
+          'contentType',
+          'sizeBytes',
+          'zipBase64',
+          'sha256',
+          'version',
+          'uploadedBy',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'bundleId',
+          'filename',
+          'contentType',
+          'sizeBytes',
+          'zipBase64',
+          'sha256',
+          'version',
+          'uploadedBy',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.bundleId is string
+        && data.bundleId == bundleId
+        && data.bundleId.size() <= 64
+        && data.bundleId.matches('^(browser-webcam|windows-vcam|pc-windows|android-studio)$')
+        && data.filename is string
+        && data.filename.size() >= 5
+        && data.filename.size() <= 128
+        && data.filename.matches('^[a-zA-Z0-9._-]+\\.zip$')
+        && data.contentType is string
+        && data.contentType == 'application/zip'
+        && data.sizeBytes is int
+        && data.sizeBytes > 0
+        && data.sizeBytes <= 750000
+        && data.zipBase64 is string
+        && data.zipBase64.size() >= 8
+        && data.zipBase64.size() <= 900000
+        && data.sha256 is string
+        && data.sha256.size() == 64
+        && data.sha256.matches('^[a-f0-9]{64}$')
+        && data.version is string
+        && data.version.size() >= 1
+        && data.version.size() <= 32
+        && data.uploadedBy is string
+        && data.uploadedBy.size() >= 1
+        && data.uploadedBy.size() <= 128
+        && data.uploadedBy == request.auth.uid
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    match /download_bundles/{bundleId} {
+      // Public read-only single-document get by canonical bundle ID (zero PII)
+      allow get: if isCanonicalBundleId(bundleId);
+      allow list: if false;
+
+      allow create: if isAdmin()
+        && isCanonicalBundleId(bundleId)
+        && isValidDownloadBundle(incoming(), bundleId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isAdmin()
+        && isCanonicalBundleId(bundleId)
+        && isValidDownloadBundle(incoming(), bundleId)
+        && incoming().bundleId == existing().bundleId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'filename',
+          'contentType',
+          'sizeBytes',
+          'zipBase64',
+          'sha256',
+          'version',
+          'uploadedBy',
+          'updatedAt'
+        ]);
+
+      allow delete: if isAdmin() && isCanonicalBundleId(bundleId);
+    }
+
+    match /admins/{adminId} {
+      allow get: if isSignedIn() && isValidId(adminId) && request.auth.uid == adminId;
+      allow list, create, update, delete: if false;
+    }
+  }
+}

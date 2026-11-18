@@ -1,6 +1,7 @@
 import { createRoot } from 'react-dom/client';
 import { registerSW } from 'virtual:pwa-register';
 import App from './App.tsx';
+import { ErrorBoundary } from './components/common/ErrorBoundary.tsx';
 import './index.css';
 
 // Point mobile camera sessions to the dedicated installable mobile PWA manifest
@@ -33,4 +34,8 @@ if (isMobileAppRoute) {
 
 registerSW({ immediate: true });
 
-createRoot(document.getElementById('root')!).render(<App />);
+createRoot(document.getElementById('root')!).render(
+  <ErrorBoundary>
+    <App />
+  </ErrorBoundary>
+);

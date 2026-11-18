@@ -1,0 +1,114 @@
+{
+  "entities": {
+    "DownloadBundle": {
+      "title": "DownloadBundle",
+      "description": "Pre-built downloadable LensLink ZIP bundle stored directly in Firebase Firestore for reliable zero-404 client downloads.",
+      "type": "object",
+      "properties": {
+        "bundleId": {
+          "type": "string",
+          "description": "Canonical bundle identifier matching document ID.",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^(browser-webcam|windows-vcam|pc-windows|android-studio)$"
+        },
+        "filename": {
+          "type": "string",
+          "description": "Download filename ending in .zip.",
+          "minLength": 5,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9._-]+\\.zip$"
+        },
+        "contentType": {
+          "type": "string",
+          "description": "MIME type of archive.",
+          "enum": ["application/zip"]
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "description": "Raw binary ZIP byte size."
+        },
+        "zipBase64": {
+          "type": "string",
+          "description": "Base64-encoded ZIP archive payload.",
+          "minLength": 8,
+          "maxLength": 900000
+        },
+        "sha256": {
+          "type": "string",
+          "description": "Lowercase hex SHA-256 digest of the ZIP bytes.",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "version": {
+          "type": "string",
+          "description": "Release version string.",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "uploadedBy": {
+          "type": "string",
+          "description": "Firebase Auth UID of the uploader.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp."
+        }
+      },
+      "required": [
+        "bundleId",
+        "filename",
+        "contentType",
+        "sizeBytes",
+        "zipBase64",
+        "sha256",
+        "version",
+        "uploadedBy",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "AdminUser": {
+      "title": "AdminUser",
+      "description": "Verified administrator UID record.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "role": {
+          "type": "string",
+          "enum": ["admin"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "role", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/download_bundles/{bundleId}": {
+      "schema": { "$ref": "#/entities/DownloadBundle" },
+      "description": "Downloadable LensLink ZIP installers and extensions stored in Firestore for zero-404 availability."
+    },
+    "/admins/{adminId}": {
+      "schema": { "$ref": "#/entities/AdminUser" },
+      "description": "Admin role lookup records."
+    }
+  }
+}

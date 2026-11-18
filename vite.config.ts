@@ -51,12 +51,19 @@ export default defineConfig(() => {
           ],
         },
         workbox: {
+          maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
           navigateFallback: '/index.html',
-          navigateFallbackDenylist: [/^\/api\//, /^\/ws/, /^\/phone-manifest\.webmanifest$/],
+          navigateFallbackDenylist: [
+            /^\/api\//,
+            /^\/downloads\//,
+            /^\/ws/,
+            /^\/phone-manifest\.webmanifest$/,
+          ],
           runtimeCaching: [
             {
-              urlPattern: ({ url }) => url.pathname.startsWith('/api/'),
+              urlPattern: ({ url }) =>
+                url.pathname.startsWith('/api/') || url.pathname.startsWith('/downloads/'),
               handler: 'NetworkOnly',
             },
           ],

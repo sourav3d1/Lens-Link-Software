@@ -12,6 +12,7 @@ import {
   Terminal,
 } from 'lucide-react';
 import { downloadBundle } from '../../lib/download';
+import { FirebaseBundleSyncCard } from '../common/FirebaseBundleSyncCard';
 
 interface VirtualCamPanelProps {
   pairCode: string;
@@ -305,6 +306,8 @@ export function VirtualCamPanel({
           </div>
         </div>
       </section>
+
+      <FirebaseBundleSyncCard />
 
       {/* Optional Chromeless / OBS Studio Browser Source (Collapsed by Default) */}
       <section className="rounded-xl bg-white border border-slate-200 overflow-hidden">
