@@ -222,6 +222,44 @@ async function startServer() {
     res.json({ ok: true, activeRooms: rooms.size });
   });
 
+  app.get('/phone-manifest.webmanifest', (_req, res) => {
+    res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.json({
+      id: '/phone',
+      name: 'LensLink Camera',
+      short_name: 'LensLink Cam',
+      description:
+        'Turn your Android or iPhone into a low-latency wireless webcam for your Windows PC.',
+      start_url: '/phone',
+      scope: '/',
+      display: 'standalone',
+      orientation: 'portrait',
+      background_color: '#020617',
+      theme_color: '#020617',
+      icons: [
+        {
+          src: '/pwa-192x192.png',
+          sizes: '192x192',
+          type: 'image/png',
+          purpose: 'any',
+        },
+        {
+          src: '/pwa-512x512.png',
+          sizes: '512x512',
+          type: 'image/png',
+          purpose: 'any',
+        },
+        {
+          src: '/pwa-maskable-512x512.png',
+          sizes: '512x512',
+          type: 'image/png',
+          purpose: 'maskable',
+        },
+      ],
+    });
+  });
+
   app.get('/api/network-info', (req, res) => {
     const lanIps = getLanIps();
     const preferredIp = lanIps[0] || null;

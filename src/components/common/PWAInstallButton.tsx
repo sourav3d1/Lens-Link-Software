@@ -1,5 +1,13 @@
 import { useState } from 'react';
-import { Download, MonitorDown, CheckCircle2, X, WifiOff } from 'lucide-react';
+import {
+  Download,
+  MonitorDown,
+  CheckCircle2,
+  X,
+  WifiOff,
+  Smartphone,
+  Share,
+} from 'lucide-react';
 import { useOnlineStatus, usePWAInstall } from '../../hooks/usePWAInstall';
 
 export function PWAInstallButton() {
@@ -144,6 +152,138 @@ export function PWAInstallButton() {
         </div>
       )}
     </>
+  );
+}
+
+export function MobilePWAInstallButton({
+  variant = 'banner',
+}: {
+  variant?: 'banner' | 'icon';
+}) {
+  const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
+  const [showGuide, setShowGuide] = useState(false);
+
+  if (isInstalled) return null;
+
+  const handleAction = () => {
+    if (isInstallable) {
+      void install();
+    } else {
+      setShowGuide(true);
+    }
+  };
+
+  if (variant === 'icon') {
+    if (!isInstallable && !isIOS) return null;
+    return (
+      <>
+        <button
+          type="button"
+          onClick={handleAction}
+          className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl hover:bg-white/10 text-blue-400"
+          aria-label="Install LensLink Cam app"
+          title="Install LensLink Cam"
+        >
+          <Download className="w-5 h-5" />
+        </button>
+        {showGuide && (
+          <MobileInstallGuideModal isIOS={isIOS} onClose={() => setShowGuide(false)} />
+        )}
+      </>
+    );
+  }
+
+  return (
+    <>
+      <div className="p-3.5 rounded-2xl bg-slate-900/90 border border-slate-800 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="w-10 h-10 rounded-xl bg-blue-600/20 border border-blue-500/30 flex items-center justify-center text-blue-400 shrink-0">
+            <Smartphone className="w-5 h-5" />
+          </div>
+          <div className="min-w-0">
+            <div className="text-xs font-semibold text-white truncate">
+              Install LensLink Cam App
+            </div>
+            <div className="text-[11px] text-slate-400 truncate">
+              {isIOS ? 'Add to iPhone Home Screen' : 'Standalone mobile camera app'}
+            </div>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={handleAction}
+          className="min-h-[40px] px-3.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold whitespace-nowrap shrink-0 transition-colors"
+        >
+          {isInstallable ? 'Install' : 'Get App'}
+        </button>
+      </div>
+
+      {showGuide && (
+        <MobileInstallGuideModal isIOS={isIOS} onClose={() => setShowGuide(false)} />
+      )}
+    </>
+  );
+}
+
+function MobileInstallGuideModal({
+  isIOS,
+  onClose,
+}: {
+  isIOS: boolean;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/70 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-sm rounded-2xl bg-slate-900 border border-slate-700 p-5 space-y-4 text-white shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between">
+          <h3 className="text-base font-semibold">
+            {isIOS ? 'Install on iPhone / iPad' : 'Install LensLink Cam'}
+          </h3>
+          <button
+            type="button"
+            onClick={onClose}
+            className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl bg-slate-800 text-slate-300"
+            aria-label="Close install instructions"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        {isIOS ? (
+          <ol className="space-y-2.5 text-sm text-slate-300 list-decimal list-inside">
+            <li>
+              Tap the <strong className="text-white inline-flex items-center gap-1"><Share className="w-3.5 h-3.5 inline" /> Share</strong> button in Safari.
+            </li>
+            <li>
+              Scroll down and tap <strong className="text-white">Add to Home Screen</strong>.
+            </li>
+            <li>
+              Open <strong className="text-white">LensLink Cam</strong> directly from your Home Screen.
+            </li>
+          </ol>
+        ) : (
+          <ol className="space-y-2.5 text-sm text-slate-300 list-decimal list-inside">
+            <li>Open your browser menu (<strong className="text-white">⋮</strong>).</li>
+            <li>Tap <strong className="text-white">Install app</strong> or <strong className="text-white">Add to Home screen</strong>.</li>
+            <li>Launch <strong className="text-white">LensLink Cam</strong> like a native app.</li>
+          </ol>
+        )}
+
+        <button
+          type="button"
+          onClick={onClose}
+          className="w-full min-h-[44px] rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold"
+        >
+          Done
+        </button>
+      </div>
+    </div>
   );
 }
 

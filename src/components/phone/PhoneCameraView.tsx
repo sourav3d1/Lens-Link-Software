@@ -4,12 +4,9 @@ import {
   ArrowLeft,
   Camera,
   CheckCircle2,
-  Crosshair,
   Download,
   Flashlight,
   FlipHorizontal2,
-  Focus,
-  Grid,
   QrCode,
   RefreshCw,
   RotateCcw,
@@ -28,7 +25,6 @@ import {
   ConnectionStatus,
   DEFAULT_CAMERA_SETTINGS,
   FrameRatePreset,
-  FramingGuide,
   ResolutionPreset,
   SignalingMessage,
 } from '../../types/lenslink';
@@ -45,6 +41,7 @@ import {
   tuneVideoSender,
 } from '../../lib/webrtc';
 import { QrScannerModal } from '../common/QrScannerModal';
+import { MobilePWAInstallButton } from '../common/PWAInstallButton';
 
 interface PhoneCameraViewProps {
   initialPairCode?: string;
@@ -70,9 +67,6 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
   const [settings, setSettings] = useState<CameraSettings>(DEFAULT_CAMERA_SETTINGS);
   const [capabilities, setCapabilities] = useState<CameraCapabilities>({ devices: [] });
 
-  // BIS Jewellery & HUID capture workflow state
-  const [framingGuide, setFramingGuide] = useState<FramingGuide>('none');
-  const [captureCategory, setCaptureCategory] = useState<CaptureCategory>('article');
   const [lastCaptured, setLastCaptured] = useState<CapturedPhoto | null>(null);
   const [captureFlash, setCaptureFlash] = useState(false);
   const [focusReticle, setFocusReticle] = useState<{ x: number; y: number } | null>(null);
@@ -93,7 +87,6 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
   const focusReticleTimerRef = useRef<number | null>(null);
   const zoomToastTimerRef = useRef<number | null>(null);
 
-  // Pinch-to-zoom tracking
   const pinchStateRef = useRef<{
     active: boolean;
     startDist: number;
@@ -243,7 +236,6 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
           setCapabilities(caps);
           capabilitiesRef.current = caps;
 
-          // Match active deviceId if browser auto-selected one
           const activeTrackSettings =
             typeof track.getSettings === 'function' ? track.getSettings() : {};
           if (activeTrackSettings.deviceId && !nextSettings.deviceId) {
@@ -290,7 +282,6 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
     async (categoryOverride?: CaptureCategory) => {
       const video = videoRef.current;
       if (!video) return;
-      const cat = categoryOverride || captureCategory;
       const currentSettings = settingsRef.current;
       const caps = capabilitiesRef.current;
       const track = localStreamRef.current?.getVideoTracks()[0] || null;
@@ -306,7 +297,7 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
         video,
         track,
         settings: currentSettings,
-        category: cat,
+        category: categoryOverride || 'article',
         lensLabel,
         hardwareBrightnessActive: Boolean(caps.brightness),
         hardwareContrastActive: Boolean(caps.contrast),
@@ -320,7 +311,7 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
         });
       }
     },
-    [captureCategory, sendWs]
+    [sendWs]
   );
 
   // Signaling WebSocket with automatic reconnection
@@ -704,32 +695,30 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
     return (
       <div className="min-h-[100dvh] bg-slate-950 text-white flex flex-col">
         <header className="flex items-center justify-between px-4 py-3 border-b border-slate-800/80">
-          <div className="flex items-center gap-3">
-            {onSwitchToPc && (
-              <button
-                type="button"
-                onClick={onSwitchToPc}
-                className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl bg-slate-900 border border-slate-800 text-slate-300 hover:text-white"
-                aria-label="Back to PC Receiver"
-              >
-                <ArrowLeft className="w-5 h-5" />
-              </button>
-            )}
-            <span className="text-lg font-bold tracking-tight whitespace-nowrap">LensLink</span>
-          </div>
-          <span className="text-xs font-medium text-slate-400 whitespace-nowrap">
-            Smartphone Camera
+          <span className="text-lg font-bold tracking-tight whitespace-nowrap">
+            LensLink Cam
           </span>
+          {onSwitchToPc && (
+            <button
+              type="button"
+              onClick={onSwitchToPc}
+              className="text-xs font-medium text-slate-400 hover:text-white py-2 px-2.5 rounded-lg"
+            >
+              PC Receiver
+            </button>
+          )}
         </header>
 
         <main className="flex-1 flex items-center justify-center p-5">
-          <div className="w-full max-w-md space-y-6">
-            <div className="space-y-2">
+          <div className="w-full max-w-md space-y-5">
+            <MobilePWAInstallButton variant="banner" />
+
+            <div className="space-y-1.5">
               <h1 className="text-2xl font-bold tracking-tight text-balance">
                 Connect your phone camera
               </h1>
               <p className="text-sm text-slate-400 leading-relaxed">
-                Scan the QR code on your Windows PC or enter the 6-character pairing code. Full lens, focus, zoom, brightness, and contrast controls unlock once paired.
+                Scan the QR code on your PC or enter the 6-character pairing code to start streaming.
               </p>
             </div>
 
@@ -748,29 +737,22 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
               <div className="h-px flex-1 bg-slate-800" />
             </div>
 
-            <form onSubmit={handleJoinSubmit} className="space-y-4">
-              <div>
-                <label
-                  htmlFor="pair-code-input"
-                  className="block text-xs font-medium text-slate-300 mb-2"
-                >
-                  6-Character Pairing Code
-                </label>
-                <input
-                  id="pair-code-input"
-                  type="text"
-                  maxLength={6}
-                  autoCapitalize="characters"
-                  autoComplete="off"
-                  spellCheck={false}
-                  value={pairCodeInput}
-                  onChange={(e) =>
-                    setPairCodeInput(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ''))
-                  }
-                  placeholder="K7M4P9"
-                  className="w-full min-h-[52px] px-4 rounded-xl bg-slate-900 border border-slate-700 focus:border-blue-500 focus:outline-none text-center font-mono text-2xl tracking-[0.35em] text-white placeholder:text-slate-600 uppercase tabular-nums"
-                />
-              </div>
+            <form onSubmit={handleJoinSubmit} className="space-y-3.5">
+              <input
+                id="pair-code-input"
+                type="text"
+                maxLength={6}
+                autoCapitalize="characters"
+                autoComplete="off"
+                spellCheck={false}
+                value={pairCodeInput}
+                onChange={(e) =>
+                  setPairCodeInput(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ''))
+                }
+                placeholder="K7M4P9"
+                aria-label="6-Character Pairing Code"
+                className="w-full min-h-[52px] px-4 rounded-xl bg-slate-900 border border-slate-700 focus:border-blue-500 focus:outline-none text-center font-mono text-2xl tracking-[0.35em] text-white placeholder:text-slate-600 uppercase tabular-nums"
+              />
 
               {errorMsg && (
                 <div className="flex items-start gap-2.5 p-3.5 rounded-xl bg-red-950/60 border border-red-900/70 text-red-200 text-xs leading-relaxed">
@@ -790,7 +772,7 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
             </form>
 
             <p className="text-xs text-slate-500 text-center">
-              Requires camera permission. No account or cloud servers used.
+              Local Wi-Fi video only. No account or cloud servers used.
             </p>
           </div>
         </main>
@@ -818,6 +800,9 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
     .join(' ');
 
   const rearDevices = capabilities.devices.filter((d) => d.facing !== 'front');
+  const showQuickLensOrTorch =
+    settings.facingMode === 'environment' && (rearDevices.length > 1 || Boolean(capabilities.torch));
+
   const statusLabel =
     connectionStatus === 'connected'
       ? `Live on ${pcName}`
@@ -829,16 +814,10 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
             ? `Paired: ${pcName}`
             : 'Waiting for PC';
 
-  const cycleFramingGuide = () => {
-    setFramingGuide((prev) =>
-      prev === 'none' ? 'article' : prev === 'article' ? 'huid' : 'none'
-    );
-  };
-
   return (
     <div className="relative h-[100dvh] w-full bg-black text-white overflow-hidden flex flex-col select-none">
       {/* Compact Top Bar */}
-      <header className="relative z-20 flex items-center justify-between px-3 py-1.5 bg-slate-950/90 backdrop-blur-md border-b border-white/10">
+      <header className="relative z-20 flex items-center justify-between px-2.5 py-1.5 bg-slate-950/90 backdrop-blur-md border-b border-white/10">
         <button
           type="button"
           onClick={handleLeaveRoom}
@@ -875,33 +854,20 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
           </div>
         </div>
 
-        <div className="flex items-center gap-1">
-          <button
-            type="button"
-            onClick={cycleFramingGuide}
-            className={`min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl transition-colors ${
-              framingGuide !== 'none'
-                ? 'bg-blue-600/25 text-blue-300'
-                : 'hover:bg-white/10 text-slate-200'
-            }`}
-            aria-label="Toggle BIS framing guide"
-            title="Cycle framing guide (Off / Article Grid / HUID Target)"
-          >
-            <Grid className="w-5 h-5" />
-          </button>
-
+        <div className="flex items-center gap-0.5">
+          <MobilePWAInstallButton variant="icon" />
           <button
             type="button"
             onClick={() => setControlsOpen(true)}
             className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl hover:bg-white/10 text-slate-200"
-            aria-label="Open all camera controls"
+            aria-label="Open camera settings"
           >
             <SlidersHorizontal className="w-5 h-5" />
           </button>
         </div>
       </header>
 
-      {/* Live Camera Viewfinder with Pinch-to-Zoom & Tap-to-Focus */}
+      {/* Live Camera Viewfinder (Pinch to Zoom + Tap to Focus) */}
       <div
         ref={viewfinderRef}
         onTouchStart={handleTouchStart}
@@ -940,27 +906,6 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
           </div>
         )}
 
-        {/* BIS Article Framing Grid */}
-        {framingGuide === 'article' && (
-          <div className="pointer-events-none absolute inset-0 z-10 grid grid-cols-3 grid-rows-3">
-            {Array.from({ length: 9 }).map((_, idx) => (
-              <div key={idx} className="border border-white/20" />
-            ))}
-          </div>
-        )}
-
-        {/* BIS HUID Macro Alignment Target */}
-        {framingGuide === 'huid' && (
-          <div className="pointer-events-none absolute inset-0 z-10 flex flex-col items-center justify-center">
-            <div className="w-56 h-24 rounded-xl border-2 border-amber-400/90 shadow-[0_0_0_9999px_rgba(0,0,0,0.35)] flex items-center justify-center">
-              <div className="w-4 h-px bg-amber-400/80" />
-            </div>
-            <span className="mt-2.5 px-2.5 py-1 rounded-md bg-black/75 text-[11px] font-medium text-amber-200">
-              Align 6-digit HUID mark inside frame
-            </span>
-          </div>
-        )}
-
         {errorMsg && (
           <div className="absolute top-3 inset-x-4 z-20 flex items-center gap-2 p-3 rounded-xl bg-red-950/90 border border-red-800 text-xs text-red-100">
             <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
@@ -969,9 +914,8 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
         )}
 
         {/* Quiet technical readout */}
-        <div className="pointer-events-none absolute top-3 left-3 z-10 px-2.5 py-1 rounded-lg bg-black/60 backdrop-blur-sm text-[11px] font-mono text-slate-200 tabular-nums">
-          {settings.resolution} · {settings.frameRate} fps · {totalZoom.toFixed(1)}× ·{' '}
-          {settings.focusMode === 'manual' ? 'Manual Focus' : 'Auto Focus'}
+        <div className="pointer-events-none absolute top-3 left-3 z-10 px-2.5 py-1 rounded-lg bg-black/55 backdrop-blur-sm text-[11px] font-mono text-slate-200 tabular-nums">
+          {settings.resolution} · {totalZoom.toFixed(1)}×
         </div>
 
         {/* Zoom feedback badge while pinching */}
@@ -981,11 +925,11 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
           </div>
         )}
 
-        {/* Last Captured Thumbnail Chip (tap to save locally too) */}
+        {/* Last Captured Thumbnail Chip */}
         {lastCaptured && (
           <a
             href={lastCaptured.dataUrl}
-            download={`${lastCaptured.category}-${Date.now()}.jpg`}
+            download={`lenslink-photo-${Date.now()}.jpg`}
             onClick={(e) => e.stopPropagation()}
             className="absolute top-3 right-3 z-20 flex items-center gap-2 p-1.5 pr-2.5 rounded-xl bg-slate-900/90 border border-white/20 text-xs text-white"
             title="Download captured photo"
@@ -993,12 +937,10 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
             <img
               src={lastCaptured.dataUrl}
               alt="Last capture"
-              className="w-9 h-9 rounded-lg object-cover"
+              className="w-8 h-8 rounded-lg object-cover"
             />
             <div className="text-left leading-tight">
-              <div className="font-semibold text-[11px]">
-                {lastCaptured.category === 'huid' ? 'HUID Saved' : 'Article Saved'}
-              </div>
+              <div className="font-semibold text-[11px]">Saved</div>
               <div className="text-[10px] text-slate-300 flex items-center gap-1">
                 <Download className="w-3 h-3" />
                 <span>Download</span>
@@ -1008,145 +950,55 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
         )}
       </div>
 
-      {/* Quick On-Screen Optical Strip (Rear Lenses, Zoom Presets, AF/MF, Torch, HUID Clarity) */}
-      <div className="relative z-20 bg-slate-950/95 border-t border-white/10 px-3 pt-2.5 pb-1.5 space-y-2">
-        {/* Rear Camera / Lens Switcher when multiple rear cameras exist */}
-        {rearDevices.length > 1 && settings.facingMode === 'environment' && (
-          <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5">
-            {rearDevices.map((dev) => {
-              const active = settings.deviceId === dev.deviceId;
-              return (
-                <button
-                  key={dev.deviceId}
-                  type="button"
-                  onClick={() =>
-                    void updateSetting({
-                      facingMode: 'environment',
-                      deviceId: dev.deviceId,
-                    })
-                  }
-                  className={`min-h-[36px] px-3 rounded-lg text-xs font-medium whitespace-nowrap shrink-0 transition-colors ${
-                    active
-                      ? 'bg-blue-600 text-white'
-                      : 'bg-slate-800/90 text-slate-300 hover:bg-slate-700'
-                  }`}
-                >
-                  {dev.shortLabel}
-                </button>
-              );
-            })}
-          </div>
-        )}
-
-        {/* Manual Focus Fine Slider when MF is selected */}
-        {settings.focusMode === 'manual' && capabilities.focusDistance && (
-          <div className="flex items-center gap-3 px-1">
-            <span className="text-[11px] font-medium text-amber-300 whitespace-nowrap">
-              Macro Focus
-            </span>
-            <input
-              type="range"
-              min={0}
-              max={1}
-              step={0.01}
-              value={settings.focusDistance}
-              onChange={(e) =>
-                void updateSetting({ focusDistance: Number(e.target.value) })
-              }
-              className="flex-1 lens-slider"
-              aria-label="Manual focus distance"
-            />
-          </div>
-        )}
-
-        {/* Zoom Quick Presets + Focus + Contrast/Torch Shortcuts */}
-        <div className="flex items-center justify-between gap-2 overflow-x-auto">
-          <div className="flex items-center gap-1 bg-slate-900 p-1 rounded-xl shrink-0">
-            {[1, 2, 3, 5].map((z) => {
-              const isSelected = Math.abs(totalZoom - z) < 0.25;
-              return (
-                <button
-                  key={z}
-                  type="button"
-                  onClick={() => setTotalZoom(z)}
-                  className={`min-h-[36px] px-2.5 rounded-lg font-mono text-xs font-semibold tabular-nums transition-colors ${
-                    isSelected
-                      ? 'bg-blue-600 text-white'
-                      : 'text-slate-300 hover:text-white'
-                  }`}
-                >
-                  {z}×
-                </button>
-              );
-            })}
+      {/* Minimal Rear Lens / Torch Bar (only shown when multi-rear-camera or flashlight is available) */}
+      {showQuickLensOrTorch && (
+        <div className="relative z-20 bg-slate-950/95 border-t border-white/10 px-3 py-2 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-1.5 overflow-x-auto">
+            {rearDevices.length > 1 &&
+              rearDevices.map((dev) => {
+                const active = settings.deviceId === dev.deviceId;
+                return (
+                  <button
+                    key={dev.deviceId}
+                    type="button"
+                    onClick={() =>
+                      void updateSetting({
+                        facingMode: 'environment',
+                        deviceId: dev.deviceId,
+                      })
+                    }
+                    className={`min-h-[36px] px-3 rounded-lg text-xs font-medium whitespace-nowrap shrink-0 transition-colors ${
+                      active
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-slate-800/90 text-slate-300 hover:bg-slate-700'
+                    }`}
+                  >
+                    {dev.shortLabel}
+                  </button>
+                );
+              })}
           </div>
 
-          <div className="flex items-center gap-1.5 shrink-0">
+          {capabilities.torch && (
             <button
               type="button"
-              onClick={() => {
-                if (
-                  settings.focusMode === 'continuous' &&
-                  capabilities.focusModes?.includes('manual')
-                ) {
-                  void updateSetting({ focusMode: 'manual' });
-                } else {
-                  void updateSetting({ focusMode: 'continuous' });
-                  const track = localStreamRef.current?.getVideoTracks()[0];
-                  void triggerTapAutoFocus(track);
-                }
-              }}
-              className={`min-h-[40px] px-2.5 rounded-xl text-xs font-medium inline-flex items-center gap-1.5 transition-colors ${
-                settings.focusMode === 'manual'
-                  ? 'bg-amber-500 text-slate-950 font-semibold'
+              onClick={() => void updateSetting({ torch: !settings.torch })}
+              className={`min-h-[36px] min-w-[40px] px-2.5 flex items-center justify-center rounded-lg shrink-0 transition-colors ${
+                settings.torch
+                  ? 'bg-amber-400 text-slate-950'
                   : 'bg-slate-800 text-slate-200'
               }`}
-              title="Toggle Auto Focus / Manual Focus"
+              aria-label="Toggle flashlight"
             >
-              <Focus className="w-3.5 h-3.5" />
-              <span>{settings.focusMode === 'manual' ? 'MF' : 'AF'}</span>
+              <Flashlight className="w-4 h-4" />
             </button>
-
-            <button
-              type="button"
-              onClick={() =>
-                void updateSetting({
-                  grayscale: !settings.grayscale,
-                  contrast: !settings.grayscale && settings.contrast < 25 ? 30 : settings.contrast,
-                })
-              }
-              className={`min-h-[40px] px-2.5 rounded-xl text-xs font-medium inline-flex items-center gap-1.5 transition-colors ${
-                settings.grayscale
-                  ? 'bg-white text-slate-950 font-semibold'
-                  : 'bg-slate-800 text-slate-200'
-              }`}
-              title="High-contrast monochrome mode for HUID reading"
-            >
-              <Crosshair className="w-3.5 h-3.5" />
-              <span>HUID B&amp;W</span>
-            </button>
-
-            {capabilities.torch && settings.facingMode === 'environment' && (
-              <button
-                type="button"
-                onClick={() => void updateSetting({ torch: !settings.torch })}
-                className={`min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl transition-colors ${
-                  settings.torch
-                    ? 'bg-amber-400 text-slate-950'
-                    : 'bg-slate-800 text-slate-200'
-                }`}
-                aria-label="Toggle flashlight"
-              >
-                <Flashlight className="w-4 h-4" />
-              </button>
-            )}
-          </div>
+          )}
         </div>
-      </div>
+      )}
 
-      {/* Natural Thumb-Zone Primary Dock: Flip, Stream, Capture Photo (Article / HUID) */}
-      <footer className="relative z-20 px-3 py-3 bg-slate-950 border-t border-white/10">
-        <div className="max-w-md mx-auto flex items-center gap-2">
+      {/* Clean 3-Button Thumb-Zone Dock: Flip, Stream, Capture Photo */}
+      <footer className="relative z-20 px-4 py-3 bg-slate-950 border-t border-white/10">
+        <div className="max-w-md mx-auto flex items-center gap-3">
           <button
             type="button"
             onClick={handleFlipCamera}
@@ -1160,7 +1012,7 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
           <button
             type="button"
             onClick={handleToggleStream}
-            className={`min-h-[48px] px-3.5 flex items-center justify-center gap-2 rounded-2xl font-semibold text-xs transition-all active:scale-[0.98] shrink-0 ${
+            className={`flex-1 min-h-[48px] px-4 flex items-center justify-center gap-2 rounded-2xl font-semibold text-sm transition-all active:scale-[0.98] ${
               isStreaming
                 ? 'bg-red-600 hover:bg-red-500 text-white'
                 : 'bg-blue-600 hover:bg-blue-500 text-white'
@@ -1169,41 +1021,29 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
             {isStreaming ? (
               <>
                 <VideoOff className="w-4 h-4" />
-                <span>Stop</span>
+                <span>Stop Stream</span>
               </>
             ) : (
               <>
                 <Video className="w-4 h-4" />
-                <span>Stream</span>
+                <span>Start Stream</span>
               </>
             )}
           </button>
 
-          {/* BIS Capture Mode + Capture Button */}
-          <div className="flex-1 flex items-center bg-slate-900 rounded-2xl p-1 border border-slate-800">
-            <button
-              type="button"
-              onClick={() =>
-                setCaptureCategory((prev) => (prev === 'article' ? 'huid' : 'article'))
-              }
-              className="min-h-[40px] px-2.5 rounded-xl bg-slate-800 text-[11px] font-semibold text-slate-200 whitespace-nowrap"
-              title="Switch photo tag between Jewellery Article and HUID"
-            >
-              {captureCategory === 'article' ? 'Article' : 'HUID'}
-            </button>
-            <button
-              type="button"
-              onClick={() => void handleCapturePhoto()}
-              className="flex-1 min-h-[40px] flex items-center justify-center gap-1.5 rounded-xl bg-white text-slate-950 hover:bg-slate-100 active:scale-[0.98] font-semibold text-xs transition-all ml-1"
-            >
-              <Camera className="w-4 h-4" />
-              <span>Capture</span>
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={() => void handleCapturePhoto()}
+            className="min-h-[48px] px-4 flex items-center justify-center gap-2 rounded-2xl bg-white text-slate-950 hover:bg-slate-100 active:scale-[0.98] font-semibold text-sm transition-all shrink-0"
+            aria-label="Take photo and send to PC"
+          >
+            <Camera className="w-4 h-4" />
+            <span>Photo</span>
+          </button>
         </div>
       </footer>
 
-      {/* Complete Camera & Image Controls Bottom Sheet */}
+      {/* Camera Settings Bottom Sheet */}
       {controlsOpen && (
         <div
           className="fixed inset-0 z-40 flex items-end bg-black/60 backdrop-blur-xs"
@@ -1216,7 +1056,7 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
             <div className="w-10 h-1.5 bg-slate-700 rounded-full mx-auto" />
 
             <div className="flex items-center justify-between">
-              <h2 className="text-base font-semibold">Camera &amp; BIS Capture Controls</h2>
+              <h2 className="text-base font-semibold">Camera Controls</h2>
               <div className="flex items-center gap-2">
                 <button
                   type="button"
@@ -1237,10 +1077,10 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
               </div>
             </div>
 
-            {/* Camera / Rear Lens Picker */}
+            {/* Camera / Lens Selection */}
             <div className="space-y-2">
               <label className="block text-xs font-medium text-slate-400">
-                Camera Lens Selection
+                Camera Lens
               </label>
               {capabilities.devices.length > 0 ? (
                 <div className="grid grid-cols-1 gap-1.5">
@@ -1303,12 +1143,12 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
               )}
             </div>
 
-            {/* Pinch / Slider Zoom */}
+            {/* Zoom */}
             <div className="space-y-2">
               <div className="flex justify-between text-xs">
                 <span className="font-medium text-slate-400 flex items-center gap-1.5">
                   <ZoomIn className="w-3.5 h-3.5" />
-                  <span>Zoom (Pinch Viewfinder or Slide)</span>
+                  <span>Zoom (or pinch viewfinder)</span>
                 </span>
                 <span className="font-mono tabular-nums text-slate-200">
                   {totalZoom.toFixed(1)}×
@@ -1325,10 +1165,10 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
               />
             </div>
 
-            {/* Focus Mode & Macro Focus Distance */}
+            {/* Focus Mode & Manual Focus */}
             <div className="space-y-2.5">
               <div className="flex items-center justify-between">
-                <span className="text-xs font-medium text-slate-400">Focus Control</span>
+                <span className="text-xs font-medium text-slate-400">Focus</span>
                 <div className="flex gap-1.5 bg-slate-800 p-1 rounded-xl">
                   <button
                     type="button"
@@ -1363,7 +1203,7 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
               {settings.focusMode === 'manual' && capabilities.focusDistance && (
                 <div className="space-y-1">
                   <div className="flex justify-between text-[11px] text-slate-400">
-                    <span>Macro Close</span>
+                    <span>Close</span>
                     <span>Far</span>
                   </div>
                   <input
@@ -1382,11 +1222,11 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
               )}
             </div>
 
-            {/* Exposure Compensation (Hardware EV when supported) */}
+            {/* Exposure Compensation */}
             {capabilities.exposureCompensation && (
               <div className="space-y-2">
                 <div className="flex justify-between text-xs">
-                  <span className="font-medium text-slate-400">Exposure (Sensor EV)</span>
+                  <span className="font-medium text-slate-400">Exposure (EV)</span>
                   <span className="font-mono tabular-nums text-slate-200">
                     {settings.exposureCompensation > 0 ? '+' : ''}
                     {settings.exposureCompensation.toFixed(1)} EV
@@ -1409,7 +1249,7 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
             {/* Brightness */}
             <div className="space-y-2">
               <div className="flex justify-between text-xs">
-                <span className="font-medium text-slate-400">Image Brightness</span>
+                <span className="font-medium text-slate-400">Brightness</span>
                 <span className="font-mono tabular-nums text-slate-200">
                   {settings.brightness > 0 ? '+' : ''}
                   {settings.brightness}%
@@ -1431,7 +1271,7 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
             {/* Contrast */}
             <div className="space-y-2">
               <div className="flex justify-between text-xs">
-                <span className="font-medium text-slate-400">Image Contrast</span>
+                <span className="font-medium text-slate-400">Contrast</span>
                 <span className="font-mono tabular-nums text-slate-200">
                   {100 + settings.contrast}%
                 </span>
@@ -1519,6 +1359,31 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
                 )}
               </div>
             )}
+
+            {/* High-Contrast Monochrome Toggle */}
+            <div className="flex items-center justify-between pt-1">
+              <span className="text-xs font-medium text-slate-400">High-Contrast B&amp;W</span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={settings.grayscale}
+                onClick={() =>
+                  void updateSetting({
+                    grayscale: !settings.grayscale,
+                    contrast: !settings.grayscale && settings.contrast < 25 ? 30 : settings.contrast,
+                  })
+                }
+                className={`w-11 h-6 rounded-full transition-colors p-0.5 ${
+                  settings.grayscale ? 'bg-blue-600' : 'bg-slate-700'
+                }`}
+              >
+                <span
+                  className={`block w-5 h-5 rounded-full bg-white transition-transform ${
+                    settings.grayscale ? 'translate-x-5' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
 
             {/* Resolution */}
             <div className="space-y-2">

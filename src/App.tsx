@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { PcReceiverView } from './components/pc/PcReceiverView';
 import { PhoneCameraView } from './components/phone/PhoneCameraView';
 import { VirtualCamOutputView } from './components/vcam/VirtualCamOutputView';
@@ -36,6 +36,13 @@ export default function App() {
   const [mode, setMode] = useState<AppMode>(initial.mode);
   const [pairCode, setPairCode] = useState<string>(initial.pairCode);
 
+  useEffect(() => {
+    // Keep standalone mobile app URL clean at /phone for iOS Add to Home Screen & Android PWA
+    if (mode === 'phone' && window.location.pathname !== '/phone') {
+      window.history.replaceState({}, '', '/phone');
+    }
+  }, [mode]);
+
   return (
     <>
       {mode === 'vcam' ? (
@@ -53,6 +60,7 @@ export default function App() {
           onOpenPhoneMode={(code) => {
             setPairCode(code);
             setMode('phone');
+            window.history.replaceState({}, '', '/phone');
           }}
         />
       )}
