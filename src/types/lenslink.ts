@@ -80,6 +80,7 @@ export interface RoomStatusPayload {
   phoneOnline: boolean;
   vcamBridgeCount: number;
   vcamWebCount: number;
+  vcamWebFrameCount?: number;
   vcamWebPeerIds?: string[];
   phoneName?: string;
   pcName?: string;
@@ -106,6 +107,8 @@ export interface SignalingMessage {
     | 'camera:photo-captured'
     | 'camera:request-capture'
     | 'vcam:bridge-toggle'
+    | 'vcam:frame-fallback'
+    | 'vcam:request-offer'
     | 'ping'
     | 'pong';
   code?: string;
@@ -127,6 +130,7 @@ export interface SignalingMessage {
   phoneOnline?: boolean;
   vcamBridgeCount?: number;
   vcamWebCount?: number;
+  vcamWebFrameCount?: number;
   vcamWebPeerIds?: string[];
   focusPoint?: { x: number; y: number };
   photo?: CapturedPhoto;

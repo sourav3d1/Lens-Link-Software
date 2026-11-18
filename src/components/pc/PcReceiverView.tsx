@@ -91,6 +91,7 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
 
   const [vcamBridgeCount, setVcamBridgeCount] = useState(0);
   const [vcamWebCount, setVcamWebCount] = useState(0);
+  const [vcamWebFrameCount, setVcamWebFrameCount] = useState(0);
   const [vcamWebPeerIds, setVcamWebPeerIds] = useState<string[]>([]);
   const [bridgeStreamEnabled, setBridgeStreamEnabled] = useState(false);
 
@@ -159,6 +160,13 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
     }
   }, []);
 
+  const closeVcamWebPeers = useCallback(() => {
+    for (const rtc of vcamPeersRef.current.values()) {
+      rtc.close();
+    }
+    vcamPeersRef.current.clear();
+  }, []);
+
   const closePhonePeer = useCallback(() => {
     if (pcRef.current) {
       pcRef.current.ontrack = null;
@@ -175,16 +183,10 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
     setHasVideoTrack(false);
     prevStatsRef.current = null;
     setStats({ width: 0, height: 0, fps: 0, bitrateKbps: 0, rttMs: null });
-  }, []);
+    closeVcamWebPeers();
+  }, [closeVcamWebPeers]);
 
-  const closeVcamWebPeers = useCallback(() => {
-    for (const rtc of vcamPeersRef.current.values()) {
-      rtc.close();
-    }
-    vcamPeersRef.current.clear();
-  }, []);
-
-  // Forward live remote MediaStream to chromeless /vcam browser outputs via local loopback WebRTC
+  // Forward live remote MediaStream to chromeless /vcam browser outputs via loopback WebRTC
   const connectVcamWebPeer = useCallback(
     async (peerId: string) => {
       const stream = remoteStreamRef.current;
@@ -193,7 +195,7 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
       const existing = vcamPeersRef.current.get(peerId);
       if (existing) existing.close();
 
-      const rtc = new RTCPeerConnection(getRtcConfiguration(true));
+      const rtc = new RTCPeerConnection(getRtcConfiguration(localOnlyIceRef.current));
       vcamPeersRef.current.set(peerId, rtc);
 
       const track = stream.getVideoTracks()[0];
@@ -218,14 +220,18 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
         }
       };
 
-      const offer = await rtc.createOffer();
-      await rtc.setLocalDescription(offer);
-      sendWs({
-        type: 'rtc:offer',
-        target: 'vcam-web',
-        peerId,
-        sdp: rtc.localDescription?.toJSON(),
-      });
+      try {
+        const offer = await rtc.createOffer();
+        await rtc.setLocalDescription(offer);
+        sendWs({
+          type: 'rtc:offer',
+          target: 'vcam-web',
+          peerId,
+          sdp: rtc.localDescription?.toJSON(),
+        });
+      } catch {
+        vcamPeersRef.current.delete(peerId);
+      }
     },
     [sendWs]
   );
@@ -275,6 +281,7 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
           if (msg.capabilities) setCapabilities(msg.capabilities);
           if (typeof msg.vcamBridgeCount === 'number') setVcamBridgeCount(msg.vcamBridgeCount);
           if (typeof msg.vcamWebCount === 'number') setVcamWebCount(msg.vcamWebCount);
+          if (typeof msg.vcamWebFrameCount === 'number') setVcamWebFrameCount(msg.vcamWebFrameCount);
           if (Array.isArray(msg.vcamWebPeerIds)) {
             setVcamWebPeerIds(msg.vcamWebPeerIds);
             // Clean up any departed vcam-web peers
@@ -290,7 +297,6 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
             setPhoneStreaming(false);
             setConnectionStatus('waiting');
             closePhonePeer();
-            closeVcamWebPeers();
           }
           return;
         }
@@ -306,7 +312,6 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
           setPhoneStreaming(active);
           if (!active) {
             closePhonePeer();
-            closeVcamWebPeers();
             setConnectionStatus(phoneOnlineRef.current ? 'waiting' : 'disconnected');
           }
           return;
@@ -320,6 +325,13 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
         if (msg.type === 'camera:photo-captured' && msg.photo) {
           const incomingPhoto = msg.photo;
           setCapturedPhotos((prev) => [incomingPhoto, ...prev].slice(0, 12));
+          return;
+        }
+
+        if (msg.type === 'vcam:request-offer' && msg.peerId) {
+          if (remoteStreamRef.current) {
+            void connectVcamWebPeer(msg.peerId);
+          }
           return;
         }
 
@@ -431,9 +443,8 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
         wsRef.current = null;
       }
       closePhonePeer();
-      closeVcamWebPeers();
     };
-  }, [closePhonePeer, closeVcamWebPeers, sendWs]);
+  }, [closePhonePeer, connectVcamWebPeer, sendWs]);
 
   // Periodically collect real WebRTC stats while connected
   useEffect(() => {
@@ -459,16 +470,17 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
     return () => clearInterval(interval);
   }, [connectionStatus]);
 
-  // Auto-enable bridge frame relay when Windows Python Virtual Cam bridge connects
+  // Auto-enable frame relay when Python Virtual Cam bridge or OBS Browser Source fallback connects
   useEffect(() => {
-    if (vcamBridgeCount > 0 && hasVideoTrack) {
+    if ((vcamBridgeCount > 0 || vcamWebFrameCount > 0) && hasVideoTrack) {
       setBridgeStreamEnabled(true);
     }
-  }, [vcamBridgeCount, hasVideoTrack]);
+  }, [vcamBridgeCount, vcamWebFrameCount, hasVideoTrack]);
 
-  // Stream JPEG frames over localhost WS to Windows Virtual Camera Bridge when enabled
+  // Stream JPEG frames via Web Worker timer (avoids Chrome background-tab throttling when OBS is focused)
   useEffect(() => {
-    if (!bridgeStreamEnabled || !hasVideoTrack || vcamBridgeCount === 0) return;
+    const hasFrameClients = vcamBridgeCount > 0 || vcamWebFrameCount > 0;
+    if (!bridgeStreamEnabled || !hasVideoTrack || !hasFrameClients) return;
 
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
@@ -478,7 +490,7 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
     const intervalMs = Math.round(1000 / targetFps);
     let busy = false;
 
-    const timer = window.setInterval(() => {
+    const pumpFrame = () => {
       const video = videoRef.current;
       const ws = wsRef.current;
       if (
@@ -536,10 +548,35 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
         'image/jpeg',
         0.82
       );
-    }, intervalMs);
+    };
 
-    return () => clearInterval(timer);
-  }, [bridgeStreamEnabled, capabilities?.brightness, capabilities?.contrast, hasVideoTrack, settings, vcamBridgeCount]);
+    let worker: Worker | null = null;
+    let workerUrl: string | null = null;
+    let fallbackTimer: number | null = null;
+
+    try {
+      const workerCode = `setInterval(() => postMessage(0), ${intervalMs});`;
+      workerUrl = URL.createObjectURL(new Blob([workerCode], { type: 'application/javascript' }));
+      worker = new Worker(workerUrl);
+      worker.onmessage = pumpFrame;
+    } catch {
+      fallbackTimer = window.setInterval(pumpFrame, intervalMs);
+    }
+
+    return () => {
+      if (worker) worker.terminate();
+      if (workerUrl) URL.revokeObjectURL(workerUrl);
+      if (fallbackTimer) clearInterval(fallbackTimer);
+    };
+  }, [
+    bridgeStreamEnabled,
+    capabilities?.brightness,
+    capabilities?.contrast,
+    hasVideoTrack,
+    settings,
+    vcamBridgeCount,
+    vcamWebFrameCount,
+  ]);
 
   // Connect loopback WebRTC streams to any attached chromeless vcam-web output windows
   useEffect(() => {
@@ -784,8 +821,14 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
       {/* Main Content Viewport */}
       <main className="flex-1 px-6 lg:px-8 py-6">
         <div className="max-w-[1440px] mx-auto">
-          {activeTab === 'receiver' && (
-            <div className="grid grid-cols-1 lg:grid-cols-[1fr_340px] gap-6 items-start">
+          <div
+            className={
+              activeTab === 'receiver'
+                ? 'grid grid-cols-1 lg:grid-cols-[1fr_340px] gap-6 items-start'
+                : 'fixed -left-[9999px] top-0 w-[640px] h-[360px] opacity-[0.01] pointer-events-none overflow-hidden'
+            }
+            aria-hidden={activeTab !== 'receiver'}
+          >
               {/* Left Column: Focal Anchor (Live Video Stage or QR Pairing Stage) */}
               <div className="space-y-4">
                 <div
@@ -1429,14 +1472,14 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
                   )}
                 </section>
               </aside>
-            </div>
-          )}
+          </div>
 
           {activeTab === 'virtual-cam' && (
             <VirtualCamPanel
               pairCode={pairCode}
               vcamBridgeCount={vcamBridgeCount}
               vcamWebCount={vcamWebCount}
+              vcamWebFrameCount={vcamWebFrameCount}
               bridgeStreamEnabled={bridgeStreamEnabled}
               onToggleBridgeStream={() => setBridgeStreamEnabled((prev) => !prev)}
               isLiveConnected={hasVideoTrack}

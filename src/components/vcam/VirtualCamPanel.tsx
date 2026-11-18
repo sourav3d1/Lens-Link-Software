@@ -13,6 +13,7 @@ interface VirtualCamPanelProps {
   pairCode: string;
   vcamBridgeCount: number;
   vcamWebCount: number;
+  vcamWebFrameCount: number;
   bridgeStreamEnabled: boolean;
   onToggleBridgeStream: () => void;
   isLiveConnected: boolean;
@@ -24,6 +25,7 @@ export function VirtualCamPanel({
   pairCode,
   vcamBridgeCount,
   vcamWebCount,
+  vcamWebFrameCount,
   bridgeStreamEnabled,
   onToggleBridgeStream,
   isLiveConnected,
@@ -31,16 +33,33 @@ export function VirtualCamPanel({
   onToggleMirror,
 }: VirtualCamPanelProps) {
   const [copiedUrl, setCopiedUrl] = useState(false);
+  const [copiedFrameUrl, setCopiedFrameUrl] = useState(false);
   const [copiedCmd, setCopiedCmd] = useState(false);
 
+  const wsOrigin = window.location.origin
+    .replace(/^https:\/\//i, 'wss://')
+    .replace(/^http:\/\//i, 'ws://');
+
   const chromelessUrl = `${window.location.origin}/?mode=vcam&pair=${pairCode}`;
-  const cliCommand = `python lenslink_vcam.py --code ${pairCode}`;
+  const frameModeUrl = `${chromelessUrl}&transport=frames`;
+  const cliCommand = `python lenslink_vcam.py --code ${pairCode} --server ${wsOrigin}`;
+  const bundleDownloadUrl = `/api/virtual-cam/bundle?origin=${encodeURIComponent(window.location.origin)}`;
 
   const handleCopyUrl = async () => {
     try {
       await navigator.clipboard.writeText(chromelessUrl);
       setCopiedUrl(true);
       window.setTimeout(() => setCopiedUrl(false), 1800);
+    } catch {
+      // Ignore clipboard failure
+    }
+  };
+
+  const handleCopyFrameUrl = async () => {
+    try {
+      await navigator.clipboard.writeText(frameModeUrl);
+      setCopiedFrameUrl(true);
+      window.setTimeout(() => setCopiedFrameUrl(false), 1800);
     } catch {
       // Ignore clipboard failure
     }
@@ -103,7 +122,7 @@ export function VirtualCamPanel({
 
           <div className="flex flex-wrap items-center gap-3">
             <a
-              href="/api/virtual-cam/bundle"
+              href={bundleDownloadUrl}
               download="lenslink-windows-vcam.zip"
               className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold transition-colors whitespace-nowrap"
             >
@@ -147,7 +166,7 @@ export function VirtualCamPanel({
               {cliCommand}
             </pre>
             <p className="text-xs text-slate-500 leading-relaxed">
-              Requires OBS Studio (v26+ virtual camera driver) or Unity Capture installed on Windows, plus Python 3.10+. Or double-click <span className="font-mono text-slate-700">start_virtual_cam.bat</span>.
+              Requires OBS Studio (v26+ virtual camera driver) or Unity Capture installed on Windows, plus Python 3.10+. Keep this PC Receiver window unminimized while streaming.
             </p>
           </div>
         </section>
@@ -160,11 +179,13 @@ export function VirtualCamPanel({
                 02. OBS Virtual Camera Output
               </h3>
               <p className="text-sm text-slate-600">
-                Zero-Python setup. Paste the chromeless local feed URL into an OBS Browser Source and click Start Virtual Camera.
+                Zero-Python setup. Paste the chromeless feed URL into an OBS Browser Source and click Start Virtual Camera.
               </p>
             </div>
             <span className="text-xs font-mono tabular-nums text-slate-500 whitespace-nowrap">
-              {vcamWebCount > 0 ? `${vcamWebCount} active` : 'Idle'}
+              {vcamWebCount > 0
+                ? `${vcamWebCount} active${vcamWebFrameCount > 0 ? ' (frame relay)' : ''}`
+                : 'Idle'}
             </span>
           </div>
 
@@ -190,15 +211,26 @@ export function VirtualCamPanel({
             </button>
           </div>
 
-          <div className="pt-2 space-y-2">
+          <div className="pt-2 space-y-2.5">
             <span className="block text-xs font-medium text-slate-500">
-              Chromeless Localhost Feed URL
+              Chromeless OBS Browser Source URL (auto WebRTC + frame fallback)
             </span>
             <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 font-mono text-xs text-slate-700 truncate">
               {chromelessUrl}
             </div>
+            <div className="flex items-center justify-between gap-2 text-xs text-slate-500">
+              <span>If OBS firewall blocks WebRTC, use Direct Frame URL:</span>
+              <button
+                type="button"
+                onClick={handleCopyFrameUrl}
+                className="inline-flex items-center gap-1 text-blue-600 hover:text-blue-700 font-medium whitespace-nowrap shrink-0"
+              >
+                {copiedFrameUrl ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                <span>{copiedFrameUrl ? 'Copied Frame URL' : 'Copy Frame Mode URL'}</span>
+              </button>
+            </div>
             <p className="text-xs text-slate-500 leading-relaxed">
-              In OBS Studio: Add <strong className="font-semibold text-slate-700">Browser Source</strong> → set 1280×720 or 1920×1080 → click <strong className="font-semibold text-slate-700">Start Virtual Camera</strong>.
+              In OBS Studio: Add <strong className="font-semibold text-slate-700">Browser Source</strong> → set 1280×720 or 1920×1080 → keep this PC Receiver window open (not minimized) → click <strong className="font-semibold text-slate-700">Start Virtual Camera</strong>.
             </p>
           </div>
         </section>

@@ -24,6 +24,7 @@ interface SocketMeta {
   code: string;
   peerId: string;
   isAlive: boolean;
+  wantsFrames?: boolean;
 }
 
 interface RoomState {
@@ -80,6 +81,9 @@ function sendJson(ws: WebSocket | null | undefined, payload: Record<string, unkn
 }
 
 function broadcastRoomStatus(room: RoomState) {
+  const vcamWebFrameCount = Array.from(room.vcamWebClients.values()).filter(
+    (c) => c.wantsFrames
+  ).length;
   const statusPayload: Record<string, unknown> = {
     type: 'room:status',
     code: room.code,
@@ -87,6 +91,7 @@ function broadcastRoomStatus(room: RoomState) {
     phoneOnline: Boolean(room.phone && room.phone.ws.readyState === WebSocket.OPEN),
     vcamBridgeCount: room.vcamBridges.size,
     vcamWebCount: room.vcamWebClients.size,
+    vcamWebFrameCount,
     vcamWebPeerIds: Array.from(room.vcamWebClients.keys()),
     phoneName: room.phoneName || undefined,
     pcName: room.pcName,
@@ -311,17 +316,34 @@ async function startServer() {
     }
   });
 
-  app.get('/api/virtual-cam/bundle', (_req, res) => {
+  app.get('/api/virtual-cam/bundle', (req, res) => {
     const vcamDir = path.join(__dirname, 'windows-virtual-cam');
     const fileNames = ['lenslink_vcam.py', 'requirements.txt', 'start_virtual_cam.bat', 'README.md'];
+
+    const rawOrigin = typeof req.query.origin === 'string' ? req.query.origin.trim() : '';
+    let wsOrigin = `ws://127.0.0.1:${PORT}`;
+    if (/^https?:\/\/[^/]+$/i.test(rawOrigin)) {
+      wsOrigin = rawOrigin.replace(/^https:\/\//i, 'wss://').replace(/^http:\/\//i, 'ws://');
+    } else if (req.headers.host) {
+      const proto = req.headers['x-forwarded-proto'] === 'https' || req.secure ? 'wss' : 'ws';
+      wsOrigin = `${proto}://${req.headers.host}`;
+    }
+
     const files: Array<{ name: string; content: Buffer }> = [];
 
     for (const fileName of fileNames) {
       const fullPath = path.join(vcamDir, fileName);
       if (fs.existsSync(fullPath)) {
+        let content = fs.readFileSync(fullPath);
+        if (fileName === 'start_virtual_cam.bat' || fileName === 'lenslink_vcam.py') {
+          content = Buffer.from(
+            content.toString('utf8').replaceAll('ws://127.0.0.1:3000', wsOrigin),
+            'utf8'
+          );
+        }
         files.push({
           name: `lenslink-windows-vcam/${fileName}`,
-          content: fs.readFileSync(fullPath),
+          content,
         });
       }
     }
@@ -580,15 +602,24 @@ async function startServer() {
     ws.on('message', (rawData, isBinary) => {
       const senderMeta = socketMetaMap.get(ws);
 
-      // Binary frames from PC receiver are relayed directly to Windows Virtual Camera bridges
+      // Binary frames from PC receiver are relayed to Windows Virtual Camera bridges and OBS Browser fallback clients
       if (isBinary) {
         if (!senderMeta || senderMeta.role !== 'pc') return;
         const room = rooms.get(senderMeta.code);
-        if (!room || room.vcamBridges.size === 0) return;
+        if (!room) return;
+        const hasFrameTargets =
+          room.vcamBridges.size > 0 ||
+          Array.from(room.vcamWebClients.values()).some((c) => c.wantsFrames);
+        if (!hasFrameTargets) return;
         room.lastActivity = Date.now();
         for (const bridge of room.vcamBridges) {
           if (bridge.ws.readyState === WebSocket.OPEN) {
             bridge.ws.send(rawData, { binary: true });
+          }
+        }
+        for (const webClient of room.vcamWebClients.values()) {
+          if (webClient.wantsFrames && webClient.ws.readyState === WebSocket.OPEN) {
+            webClient.ws.send(rawData, { binary: true });
           }
         }
         return;
@@ -699,16 +730,28 @@ async function startServer() {
           settings: incoming,
           from: senderMeta.role,
         });
-        // Also forward mirror setting to chromeless vcam-web outputs
-        if (typeof incoming.mirror === 'boolean') {
-          for (const webClient of room.vcamWebClients.values()) {
-            sendJson(webClient.ws, {
-              type: 'camera:settings',
-              settings: { mirror: incoming.mirror },
-              from: senderMeta.role,
-            });
-          }
+        // Forward visual settings to chromeless vcam-web outputs so OBS mirrors PC controls
+        for (const webClient of room.vcamWebClients.values()) {
+          sendJson(webClient.ws, {
+            type: 'camera:settings',
+            settings: incoming,
+            from: senderMeta.role,
+          });
         }
+        return;
+      }
+
+      if (type === 'vcam:frame-fallback' && senderMeta.role === 'vcam-web') {
+        senderMeta.wantsFrames = Boolean(msg.enabled);
+        broadcastRoomStatus(room);
+        return;
+      }
+
+      if (type === 'vcam:request-offer' && senderMeta.role === 'vcam-web') {
+        sendJson(room.pc?.ws, {
+          type: 'vcam:request-offer',
+          peerId: senderMeta.peerId,
+        });
         return;
       }
 
