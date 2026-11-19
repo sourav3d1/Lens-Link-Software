@@ -78,6 +78,118 @@
         "updatedAt"
       ]
     },
+    "WebRtcRoom": {
+      "title": "WebRtcRoom",
+      "description": "Ephemeral WebRTC signaling state for pairing a smartphone camera with a PC Receiver on the same network.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 6,
+          "pattern": "^[A-Z0-9]{6}$"
+        },
+        "sessionToken": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "pcName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "pcOnline": {
+          "type": "boolean"
+        },
+        "phoneOnline": {
+          "type": "boolean"
+        },
+        "phoneName": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "phoneStreaming": {
+          "type": "boolean"
+        },
+        "offerId": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "offerSdp": {
+          "type": "string",
+          "maxLength": 25000
+        },
+        "answerForOfferId": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "answerSdp": {
+          "type": "string",
+          "maxLength": 25000
+        },
+        "phoneIceCandidates": {
+          "type": "array"
+        },
+        "pcIceCandidates": {
+          "type": "array"
+        },
+        "restartNonce": {
+          "type": "integer"
+        },
+        "focusNonce": {
+          "type": "integer"
+        },
+        "focusX": {
+          "type": "number"
+        },
+        "focusY": {
+          "type": "number"
+        },
+        "captureNonce": {
+          "type": "integer"
+        },
+        "settings": {
+          "type": "object"
+        },
+        "capabilities": {
+          "type": "object"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "code",
+        "sessionToken",
+        "pcName",
+        "pcOnline",
+        "phoneOnline",
+        "phoneName",
+        "phoneStreaming",
+        "offerId",
+        "offerSdp",
+        "answerForOfferId",
+        "answerSdp",
+        "phoneIceCandidates",
+        "pcIceCandidates",
+        "restartNonce",
+        "focusNonce",
+        "focusX",
+        "focusY",
+        "captureNonce",
+        "settings",
+        "capabilities",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
     "AdminUser": {
       "title": "AdminUser",
       "description": "Verified administrator UID record.",
@@ -105,6 +217,10 @@
     "/download_bundles/{bundleId}": {
       "schema": { "$ref": "#/entities/DownloadBundle" },
       "description": "Downloadable LensLink ZIP installers and extensions stored in Firestore for zero-404 availability."
+    },
+    "/webrtc_rooms/{roomCode}": {
+      "schema": { "$ref": "#/entities/WebRtcRoom" },
+      "description": "Ephemeral WebRTC signaling documents enabling zero-config mobile-to-PC streaming across local Wi-Fi and deployed URLs."
     },
     "/admins/{adminId}": {
       "schema": { "$ref": "#/entities/AdminUser" },

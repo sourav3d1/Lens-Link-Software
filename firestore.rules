@@ -18,6 +18,12 @@ service cloud.firestore {
         && bundleId.matches('^(browser-webcam|windows-vcam|pc-windows|android-studio)$');
     }
 
+    function isRoomCode(code) {
+      return code is string
+        && code.size() == 6
+        && code.matches('^[A-Z0-9]{6}$');
+    }
+
     function incoming() {
       return request.resource.data;
     }
@@ -97,6 +103,109 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidIceList(listVal) {
+      return listVal is list
+        && listVal.size() <= 24
+        && (listVal.size() == 0 || (listVal[0] is string && listVal[0].size() <= 600));
+    }
+
+    function isValidWebRtcRoom(data, roomCode) {
+      return data.keys().hasAll([
+          'code',
+          'sessionToken',
+          'pcName',
+          'pcOnline',
+          'phoneOnline',
+          'phoneName',
+          'phoneStreaming',
+          'offerId',
+          'offerSdp',
+          'answerForOfferId',
+          'answerSdp',
+          'phoneIceCandidates',
+          'pcIceCandidates',
+          'restartNonce',
+          'focusNonce',
+          'focusX',
+          'focusY',
+          'captureNonce',
+          'settings',
+          'capabilities',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'code',
+          'sessionToken',
+          'pcName',
+          'pcOnline',
+          'phoneOnline',
+          'phoneName',
+          'phoneStreaming',
+          'offerId',
+          'offerSdp',
+          'answerForOfferId',
+          'answerSdp',
+          'phoneIceCandidates',
+          'pcIceCandidates',
+          'restartNonce',
+          'focusNonce',
+          'focusX',
+          'focusY',
+          'captureNonce',
+          'settings',
+          'capabilities',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.code is string
+        && data.code == roomCode
+        && isRoomCode(data.code)
+        && data.sessionToken is string
+        && data.sessionToken.size() >= 8
+        && data.sessionToken.size() <= 64
+        && data.sessionToken.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.pcName is string
+        && data.pcName.size() >= 1
+        && data.pcName.size() <= 40
+        && data.pcOnline is bool
+        && data.phoneOnline is bool
+        && data.phoneName is string
+        && data.phoneName.size() <= 64
+        && data.phoneStreaming is bool
+        && data.offerId is string
+        && data.offerId.size() <= 64
+        && data.offerSdp is string
+        && data.offerSdp.size() <= 25000
+        && data.answerForOfferId is string
+        && data.answerForOfferId.size() <= 64
+        && data.answerSdp is string
+        && data.answerSdp.size() <= 25000
+        && isValidIceList(data.phoneIceCandidates)
+        && isValidIceList(data.pcIceCandidates)
+        && data.restartNonce is int
+        && data.restartNonce >= 0
+        && data.restartNonce <= 1000000
+        && data.focusNonce is int
+        && data.focusNonce >= 0
+        && data.focusNonce <= 1000000
+        && data.focusX is number
+        && data.focusX >= 0
+        && data.focusX <= 1
+        && data.focusY is number
+        && data.focusY >= 0
+        && data.focusY <= 1
+        && data.captureNonce is int
+        && data.captureNonce >= 0
+        && data.captureNonce <= 1000000
+        && data.settings is map
+        && data.settings.size() <= 25
+        && data.capabilities is map
+        && data.capabilities.size() <= 20
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
     match /download_bundles/{bundleId} {
       // Public read-only single-document get by canonical bundle ID (zero PII)
       allow get: if isCanonicalBundleId(bundleId);
@@ -126,6 +235,56 @@ service cloud.firestore {
         ]);
 
       allow delete: if isAdmin() && isCanonicalBundleId(bundleId);
+    }
+
+    match /webrtc_rooms/{roomCode} {
+      // Ephemeral WebRTC signaling rooms keyed by dynamic 6-char pairing code (zero PII)
+      allow get: if isRoomCode(roomCode);
+      allow list: if false;
+
+      allow create: if isRoomCode(roomCode)
+        && isValidWebRtcRoom(incoming(), roomCode)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isRoomCode(roomCode)
+        && isValidWebRtcRoom(incoming(), roomCode)
+        && incoming().code == existing().code
+        && incoming().sessionToken == existing().sessionToken
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action: PC session update / WebRTC answer / remote controls
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'pcName',
+            'pcOnline',
+            'answerForOfferId',
+            'answerSdp',
+            'pcIceCandidates',
+            'restartNonce',
+            'focusNonce',
+            'focusX',
+            'focusY',
+            'captureNonce',
+            'settings',
+            'updatedAt'
+          ])
+          ||
+          // Action: Smartphone join / WebRTC offer / capabilities / settings
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'phoneOnline',
+            'phoneName',
+            'phoneStreaming',
+            'offerId',
+            'offerSdp',
+            'phoneIceCandidates',
+            'capabilities',
+            'settings',
+            'updatedAt'
+          ])
+        );
+
+      allow delete: if false;
     }
 
     match /admins/{adminId} {
