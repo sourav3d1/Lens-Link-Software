@@ -3,10 +3,14 @@ import {
   Camera,
   Check,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Copy,
   FlipHorizontal2,
   Maximize2,
+  MonitorPlay,
   RefreshCw,
+  SlidersHorizontal,
   Smartphone,
   Video,
   Wifi,
@@ -31,17 +35,22 @@ import {
   StreamStats,
 } from '../../types/lenslink';
 import {
+  applyLowLatencyReceiver,
   buildVideoFilterCss,
   captureProcessedPhoto,
   collectInboundStats,
   getRtcConfiguration,
   getWsUrl,
+  preferHardwareVideoCodec,
+  tuneVideoSender,
 } from '../../lib/webrtc';
 import {
   createOrResetPcRoom,
   decodeIceCandidate,
   encodeIceCandidate,
+  subscribeToObsViewer,
   subscribeToRoom,
+  updateObsViewerFromPc,
   updatePcRoomFields,
 } from '../../lib/firestoreSignaling';
 import { VirtualCamPanel } from '../vcam/VirtualCamPanel';
@@ -50,6 +59,7 @@ import { PWAInstallButton } from '../common/PWAInstallButton';
 import { downloadBundle } from '../../lib/download';
 
 const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+const PC_ROOM_CODE_KEY = 'lenslink_pc_room_code';
 
 function generateLocalPairingCode(): string {
   const bytes = new Uint8Array(6);
@@ -59,6 +69,32 @@ function generateLocalPairingCode(): string {
     code += CODE_ALPHABET[bytes[i] % CODE_ALPHABET.length];
   }
   return code;
+}
+
+function getOrCreatePersistentRoomCode(): string {
+  try {
+    const saved = (localStorage.getItem(PC_ROOM_CODE_KEY) || '').trim().toUpperCase();
+    if (/^[A-Z0-9]{6}$/.test(saved)) {
+      return saved;
+    }
+  } catch {
+    // Ignore storage read error
+  }
+  const fresh = generateLocalPairingCode();
+  try {
+    localStorage.setItem(PC_ROOM_CODE_KEY, fresh);
+  } catch {
+    // Ignore storage write error
+  }
+  return fresh;
+}
+
+function savePersistentRoomCode(code: string): void {
+  try {
+    localStorage.setItem(PC_ROOM_CODE_KEY, code);
+  } catch {
+    // Ignore storage write error
+  }
 }
 
 function generateSessionToken(): string {
@@ -83,8 +119,8 @@ interface PcReceiverViewProps {
 
 export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
   const [activeTab, setActiveTab] = useState<ActiveTab>('receiver');
-  // Generate a brand-new dynamic session pairing code and token every time the PC app opens
-  const [pairCode, setPairCode] = useState<string>(generateLocalPairingCode);
+  // Persistent Iriun-style room code so phone & OBS Browser Source auto-connect without re-pasting
+  const [pairCode, setPairCode] = useState<string>(getOrCreatePersistentRoomCode);
   const [sessionToken, setSessionToken] = useState<string>(generateSessionToken);
   const [pcName, setPcName] = useState<string>(getSavedPcName);
   const [networkInfo, setNetworkInfo] = useState<NetworkInfoResponse | null>(null);
@@ -103,6 +139,8 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
   const [bridgeStreamEnabled, setBridgeStreamEnabled] = useState(false);
   const [extConnected, setExtConnected] = useState(false);
   const [extRelayActive, setExtRelayActive] = useState(false);
+  const [obsConnected, setObsConnected] = useState(false);
+  const [adjustmentsOpen, setAdjustmentsOpen] = useState(false);
 
   const [settings, setSettings] = useState<CameraSettings>(DEFAULT_CAMERA_SETTINGS);
   const [capabilities, setCapabilities] = useState<CameraCapabilities | null>(null);
@@ -116,6 +154,7 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
 
   const [copiedCode, setCopiedCode] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
+  const [copiedObsUrl, setCopiedObsUrl] = useState(false);
   const [localOnlyIce, setLocalOnlyIce] = useState<boolean>(false);
   const [capturedPhotos, setCapturedPhotos] = useState<CapturedPhoto[]>([]);
   const [downloadingAndroid, setDownloadingAndroid] = useState(false);
@@ -149,6 +188,17 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
   const restartNonceRef = useRef<number>(0);
   const focusNonceRef = useRef<number>(0);
   const lastSyncedSettingsJsonRef = useRef<string>('');
+
+  // Firestore OBS Studio loopback WebRTC refs
+  const obsPcRef = useRef<RTCPeerConnection | null>(null);
+  const obsOfferIdRef = useRef<string>('');
+  const obsAppliedAnswerOfferIdRef = useRef<string>('');
+  const obsLastRequestNonceRef = useRef<number>(-1);
+  const obsViewerPresentRef = useRef<boolean>(false);
+  const obsProcessedViewerIceRef = useRef<Set<string>>(new Set());
+  const obsPendingViewerIceRef = useRef<RTCIceCandidateInit[]>([]);
+  const obsPcIceListRef = useRef<string[]>([]);
+  const obsPcIceFlushTimerRef = useRef<number | null>(null);
 
   pairCodeRef.current = pairCode;
   sessionTokenRef.current = sessionToken;
@@ -189,12 +239,30 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
     }
   }, []);
 
+  const closeObsPeer = useCallback(() => {
+    if (obsPcIceFlushTimerRef.current) {
+      clearTimeout(obsPcIceFlushTimerRef.current);
+      obsPcIceFlushTimerRef.current = null;
+    }
+    obsPcIceListRef.current = [];
+    obsPendingViewerIceRef.current = [];
+    if (obsPcRef.current) {
+      obsPcRef.current.onicecandidate = null;
+      obsPcRef.current.onconnectionstatechange = null;
+      obsPcRef.current.oniceconnectionstatechange = null;
+      obsPcRef.current.close();
+      obsPcRef.current = null;
+    }
+    setObsConnected(false);
+  }, []);
+
   const closeVcamWebPeers = useCallback(() => {
     for (const rtc of vcamPeersRef.current.values()) {
       rtc.close();
     }
     vcamPeersRef.current.clear();
-  }, []);
+    closeObsPeer();
+  }, [closeObsPeer]);
 
   const closePhonePeer = useCallback(
     (clearPendingIce = true) => {
@@ -262,10 +330,11 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
               pcIceCandidates: [...pcIceListRef.current],
             });
           }
-        }, 120);
+        }, 50);
       };
 
       rtc.ontrack = (trackEvent) => {
+        applyLowLatencyReceiver(rtc);
         const stream =
           trackEvent.streams[0] ||
           (trackEvent.track ? new MediaStream([trackEvent.track]) : null);
@@ -308,6 +377,7 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
         const connState = rtc.connectionState;
         const iceState = rtc.iceConnectionState;
         if (connState === 'connected' || iceState === 'connected' || iceState === 'completed') {
+          applyLowLatencyReceiver(rtc);
           setConnectionStatus('connected');
         } else if (connState === 'connecting' || iceState === 'checking') {
           setConnectionStatus('connecting');
@@ -336,6 +406,7 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
 
         const answer = await rtc.createAnswer();
         await rtc.setLocalDescription(answer);
+        applyLowLatencyReceiver(rtc);
 
         const localDesc = rtc.localDescription;
         if (localDesc) {
@@ -356,6 +427,77 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
     },
     [closePhonePeer, requestPhoneRestart, sendWs]
   );
+
+  // Firestore localhost loopback WebRTC offer to OBS Studio Browser Source (zero /ws required)
+  const startObsLoopbackOffer = useCallback(async () => {
+    const stream = remoteStreamRef.current;
+    const code = pairCodeRef.current;
+    if (!stream || !code) return;
+    const videoTrack = stream.getVideoTracks()[0];
+    if (!videoTrack || videoTrack.readyState !== 'live') return;
+
+    closeObsPeer();
+    const offerId = `obs-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    obsOfferIdRef.current = offerId;
+    obsAppliedAnswerOfferIdRef.current = '';
+    obsProcessedViewerIceRef.current.clear();
+    obsPendingViewerIceRef.current = [];
+
+    const obsRtc = new RTCPeerConnection(getRtcConfiguration(false));
+    obsPcRef.current = obsRtc;
+
+    const sender = obsRtc.addTrack(videoTrack, stream);
+    preferHardwareVideoCodec(obsRtc);
+    await tuneVideoSender(sender, settingsRef.current);
+
+    const flushObsPcIce = () => {
+      if (obsPcIceFlushTimerRef.current) return;
+      obsPcIceFlushTimerRef.current = window.setTimeout(() => {
+        obsPcIceFlushTimerRef.current = null;
+        if (obsOfferIdRef.current === offerId && obsPcIceListRef.current.length > 0) {
+          void updateObsViewerFromPc(pairCodeRef.current, {
+            pcIceCandidates: [...obsPcIceListRef.current],
+          });
+        }
+      }, 50);
+    };
+
+    obsRtc.onicecandidate = (ev) => {
+      if (ev.candidate) {
+        const encoded = encodeIceCandidate(ev.candidate.toJSON());
+        if (encoded && !obsPcIceListRef.current.includes(encoded) && obsPcIceListRef.current.length < 24) {
+          obsPcIceListRef.current.push(encoded);
+          flushObsPcIce();
+        }
+      }
+    };
+
+    const syncObsState = () => {
+      const cState = obsRtc.connectionState;
+      const iState = obsRtc.iceConnectionState;
+      if (cState === 'connected' || iState === 'connected' || iState === 'completed') {
+        setObsConnected(true);
+      } else if (cState === 'failed' || cState === 'closed' || cState === 'disconnected') {
+        setObsConnected(false);
+      }
+    };
+    obsRtc.onconnectionstatechange = syncObsState;
+    obsRtc.oniceconnectionstatechange = syncObsState;
+
+    try {
+      const offer = await obsRtc.createOffer();
+      await obsRtc.setLocalDescription(offer);
+      if (obsRtc.localDescription?.sdp && obsOfferIdRef.current === offerId) {
+        await updateObsViewerFromPc(code, {
+          offerId,
+          offerSdp: obsRtc.localDescription.sdp,
+          pcIceCandidates: [...obsPcIceListRef.current],
+        });
+      }
+    } catch {
+      closeObsPeer();
+    }
+  }, [closeObsPeer]);
 
   // Forward live remote MediaStream to chromeless /vcam browser outputs via loopback WebRTC
   const connectVcamWebPeer = useCallback(
@@ -521,6 +663,85 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
       unsub();
     };
   }, [pairCode, closePhonePeer, handleIncomingOffer]);
+
+  // Subscribe to Firestore OBS Studio Browser Source viewer requests
+  useEffect(() => {
+    if (!pairCode) return;
+    let active = true;
+    obsLastRequestNonceRef.current = -1;
+    obsViewerPresentRef.current = false;
+    obsProcessedViewerIceRef.current.clear();
+
+    const unsub = subscribeToObsViewer(pairCode, async (viewer) => {
+      if (!active) return;
+      if (!viewer) {
+        obsViewerPresentRef.current = false;
+        return;
+      }
+
+      obsViewerPresentRef.current = true;
+      const reqNonce = typeof viewer.requestNonce === 'number' ? viewer.requestNonce : 0;
+
+      if (reqNonce > 0 && reqNonce !== obsLastRequestNonceRef.current) {
+        obsLastRequestNonceRef.current = reqNonce;
+        if (remoteStreamRef.current && hasVideoTrackRef.current) {
+          void startObsLoopbackOffer();
+        }
+        return;
+      }
+
+      if (
+        viewer.answerForOfferId &&
+        viewer.answerForOfferId === obsOfferIdRef.current &&
+        viewer.answerSdp &&
+        obsAppliedAnswerOfferIdRef.current !== viewer.answerForOfferId &&
+        obsPcRef.current
+      ) {
+        obsAppliedAnswerOfferIdRef.current = viewer.answerForOfferId;
+        try {
+          await obsPcRef.current.setRemoteDescription(
+            new RTCSessionDescription({ type: 'answer', sdp: viewer.answerSdp })
+          );
+          for (const cand of obsPendingViewerIceRef.current) {
+            await obsPcRef.current.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
+          }
+          obsPendingViewerIceRef.current = [];
+        } catch {
+          // Ignore stale OBS answer
+        }
+      }
+
+      if (
+        Array.isArray(viewer.viewerIceCandidates) &&
+        viewer.answerForOfferId === obsOfferIdRef.current
+      ) {
+        for (const encoded of viewer.viewerIceCandidates) {
+          if (obsProcessedViewerIceRef.current.has(encoded)) continue;
+          obsProcessedViewerIceRef.current.add(encoded);
+          const decoded = decodeIceCandidate(encoded);
+          if (!decoded) continue;
+          if (obsPcRef.current && obsPcRef.current.remoteDescription) {
+            await obsPcRef.current.addIceCandidate(new RTCIceCandidate(decoded)).catch(() => {});
+          } else {
+            obsPendingViewerIceRef.current.push(decoded);
+          }
+        }
+      }
+    });
+
+    return () => {
+      active = false;
+      unsub();
+      closeObsPeer();
+    };
+  }, [pairCode, closeObsPeer, startObsLoopbackOffer]);
+
+  // If OBS Browser Source was already open waiting when phone stream begins, connect immediately
+  useEffect(() => {
+    if (hasVideoTrack && remoteStreamRef.current && obsViewerPresentRef.current && !obsPcRef.current) {
+      void startObsLoopbackOffer();
+    }
+  }, [hasVideoTrack, startObsLoopbackOffer]);
 
   // Optional local Express WebSocket signaling (auto-backs off silently if /ws is not hosted)
   useEffect(() => {
@@ -768,8 +989,8 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
     };
   }, [pairCode]);
 
-  // Stream JPEG frames via Web Worker timer (avoids Chrome background-tab throttling)
-  // Feeds BOTH direct Chrome Extension relay (no WebSocket!) AND optional local WS bridges
+  // Stream frames asynchronously via Web Worker timer (zero main-thread freeze!)
+  // Downscales Chrome Extension frames to max 960px WebP/JPEG (~70% smaller, buttery smooth)
   useEffect(() => {
     const hasWsFrameClients = vcamBridgeCount > 0 || vcamWebFrameCount > 0;
     const needsExtensionFrames = extRelayActive;
@@ -777,16 +998,27 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
     if (!needsExtensionFrames && !(bridgeStreamEnabled && hasWsFrameClients)) return;
 
     const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { alpha: false });
     if (!ctx) return;
 
     const targetFps = Math.min(30, settings.frameRate || 30);
     const intervalMs = Math.round(1000 / targetFps);
     let busy = false;
+    let disposed = false;
+
+    const blobToDataUrl = (blob: Blob): Promise<string | null> =>
+      new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          resolve(typeof reader.result === 'string' ? reader.result : null);
+        };
+        reader.onerror = () => resolve(null);
+        reader.readAsDataURL(blob);
+      });
 
     const pumpFrame = () => {
       const video = videoRef.current;
-      if (busy || !video || video.readyState < video.HAVE_CURRENT_DATA) {
+      if (disposed || busy || !video || video.readyState < video.HAVE_CURRENT_DATA) {
         return;
       }
 
@@ -799,11 +1031,18 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
       if (!sendOverWs && !sendToExt) return;
 
       const dims = RESOLUTION_DIMENSIONS[settings.resolution] || RESOLUTION_DIMENSIONS['720p'];
-      const w = video.videoWidth || dims.width;
-      const h = video.videoHeight || dims.height;
-      if (canvas.width !== w || canvas.height !== h) {
-        canvas.width = w;
-        canvas.height = h;
+      const srcW = video.videoWidth || dims.width;
+      const srcH = video.videoHeight || dims.height;
+
+      // Cap extension relay at 960px wide to keep 30fps crisp with near-zero CPU & IPC overhead
+      const maxRelayW = sendOverWs ? 1280 : 960;
+      const scale = srcW > maxRelayW ? maxRelayW / srcW : 1;
+      const outW = Math.max(2, Math.round(srcW * scale));
+      const outH = Math.max(2, Math.round(srcH * scale));
+
+      if (canvas.width !== outW || canvas.height !== outH) {
+        canvas.width = outW;
+        canvas.height = outH;
       }
 
       const filterCss = buildVideoFilterCss(
@@ -812,57 +1051,58 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
         Boolean(capabilities?.contrast)
       );
       const dz = Math.max(1, settings.digitalZoom || 1);
-      const cropW = Math.round(w / dz);
-      const cropH = Math.round(h / dz);
-      const cropX = Math.round((w - cropW) / 2);
-      const cropY = Math.round((h - cropH) / 2);
+      const cropW = Math.round(srcW / dz);
+      const cropH = Math.round(srcH / dz);
+      const cropX = Math.round((srcW - cropW) / 2);
+      const cropY = Math.round((srcH - cropH) / 2);
 
       busy = true;
       ctx.save();
       if (settings.mirror) {
-        ctx.translate(w, 0);
+        ctx.translate(outW, 0);
         ctx.scale(-1, 1);
       }
       ctx.filter = filterCss || 'none';
-      ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, w, h);
+      ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, outW, outH);
       ctx.restore();
 
-      if (sendToExt) {
-        try {
-          const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
-          window.postMessage(
-            {
-              source: 'lenslink-pc-app',
-              type: 'pc-frame',
-              dataUrl,
-            },
-            '*'
-          );
-        } catch {
-          // Ignore canvas export error
-        }
-      }
+      const mimeType = sendOverWs ? 'image/jpeg' : 'image/webp';
+      const quality = sendOverWs ? 0.8 : 0.72;
 
-      if (sendOverWs && ws) {
-        canvas.toBlob(
-          (blob) => {
-            if (blob && ws.readyState === WebSocket.OPEN) {
-              void blob.arrayBuffer().then((buf) => {
-                if (ws.readyState === WebSocket.OPEN) {
-                  ws.send(buf);
-                }
-                busy = false;
-              });
-            } else {
-              busy = false;
+      canvas.toBlob(
+        async (blob) => {
+          try {
+            if (disposed || !blob) return;
+
+            if (sendToExt) {
+              const dataUrl = await blobToDataUrl(blob);
+              if (!disposed && dataUrl) {
+                window.postMessage(
+                  {
+                    source: 'lenslink-pc-app',
+                    type: 'pc-frame',
+                    dataUrl,
+                  },
+                  '*'
+                );
+              }
             }
-          },
-          'image/jpeg',
-          0.82
-        );
-      } else {
-        busy = false;
-      }
+
+            if (sendOverWs && ws && ws.readyState === WebSocket.OPEN) {
+              const buf = await blob.arrayBuffer();
+              if (!disposed && ws.readyState === WebSocket.OPEN) {
+                ws.send(buf);
+              }
+            }
+          } catch {
+            // Ignore transient frame encode error
+          } finally {
+            busy = false;
+          }
+        },
+        mimeType,
+        quality
+      );
     };
 
     let worker: Worker | null = null;
@@ -879,6 +1119,7 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
     }
 
     return () => {
+      disposed = true;
       if (worker) worker.terminate();
       if (workerUrl) URL.revokeObjectURL(workerUrl);
       if (fallbackTimer) clearInterval(fallbackTimer);
@@ -913,6 +1154,7 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
     setConnectionStatus('waiting');
     const nextCode = generateLocalPairingCode();
     const nextToken = generateSessionToken();
+    savePersistentRoomCode(nextCode);
     setPairCode(nextCode);
     setSessionToken(nextToken);
     pairCodeRef.current = nextCode;
@@ -954,6 +1196,7 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
   const pairingUrl = pairCode
     ? `${selectedOrigin}/phone?pair=${pairCode}&sid=${sessionToken}`
     : '';
+  const obsBrowserUrl = pairCode ? `${window.location.origin}/?mode=vcam&pair=${pairCode}` : '';
 
   const handleCopyCode = async () => {
     if (!pairCode) return;
@@ -967,6 +1210,13 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
     await navigator.clipboard.writeText(pairingUrl).catch(() => {});
     setCopiedLink(true);
     window.setTimeout(() => setCopiedLink(false), 1600);
+  };
+
+  const handleCopyObsUrl = async () => {
+    if (!obsBrowserUrl) return;
+    await navigator.clipboard.writeText(obsBrowserUrl).catch(() => {});
+    setCopiedObsUrl(true);
+    window.setTimeout(() => setCopiedObsUrl(false), 1600);
   };
 
   const handleCaptureOnPc = async (category: CaptureCategory) => {
@@ -1100,7 +1350,7 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
                   : 'border-transparent text-slate-600 hover:text-slate-900'
               }`}
             >
-              Receiver
+              Webcam
             </button>
             <button
               type="button"
@@ -1111,7 +1361,7 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
                   : 'border-transparent text-slate-600 hover:text-slate-900'
               }`}
             >
-              Virtual Webcam
+              Apps &amp; OBS
             </button>
             <button
               type="button"
@@ -1122,7 +1372,7 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
                   : 'border-transparent text-slate-600 hover:text-slate-900'
               }`}
             >
-              Setup Guide
+              Setup
             </button>
           </nav>
 
@@ -1133,7 +1383,7 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
               onClick={handleRegenerateCode}
               className="px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
             >
-              New Pairing Code
+              New Code
             </button>
           </div>
         </div>
@@ -1210,11 +1460,11 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
                         <div className="space-y-1.5">
                           <h1 className="text-xl sm:text-2xl font-semibold tracking-tight text-white">
                             {phoneOnline
-                              ? 'Smartphone connected — tap Start Streaming on your phone'
-                              : 'Scan QR code with your phone'}
+                              ? 'Smartphone connected — tap Start Stream on your phone'
+                              : 'Scan once — connect & play anytime'}
                           </h1>
                           <p className="text-sm text-slate-400 leading-relaxed">
-                            Open your Android or iPhone camera to scan, or visit the address below in Chrome or Safari.
+                            Your PC remembers this code automatically so your phone and OBS Studio reconnect with one tap next time.
                           </p>
                         </div>
 
@@ -1254,14 +1504,14 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
                     <div className="absolute inset-0 bg-slate-950/70 backdrop-blur-xs flex flex-col items-center justify-center gap-3 text-white">
                       <RefreshCw className="w-7 h-7 animate-spin text-amber-400" />
                       <p className="text-sm font-medium">
-                        Wi-Fi signal interrupted — attempting automatic reconnection
+                        Wi-Fi signal interrupted — reconnecting automatically
                       </p>
                     </div>
                   )}
                 </div>
 
-                {/* Clean Unboxed Status & Telemetry Bar */}
-                <div className="flex flex-wrap items-center justify-between gap-4 px-1 py-1">
+                {/* Iriun-Style Instant 1-Click Play & Speed Bar */}
+                <div className="p-3.5 rounded-xl bg-white border border-slate-200 flex flex-wrap items-center justify-between gap-3">
                   <div className="flex flex-wrap items-center gap-2.5 text-xs text-slate-600">
                     <span className="inline-flex items-center gap-2 font-semibold text-slate-900">
                       <span
@@ -1274,35 +1524,92 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
                     <span aria-hidden="true" className="text-slate-300">·</span>
 
                     <span className="font-mono tabular-nums">
-                      {stats.width > 0 ? `${stats.width} × ${stats.height}` : RESOLUTION_DIMENSIONS[settings.resolution].label}
+                      {stats.width > 0 ? `${stats.width}×${stats.height}` : RESOLUTION_DIMENSIONS[settings.resolution].label}
                     </span>
 
                     <span aria-hidden="true" className="text-slate-300">·</span>
 
                     <span className="font-mono tabular-nums">
-                      {hasVideoTrack && stats.fps > 0 ? `${stats.fps} fps` : `${settings.frameRate} fps target`}
+                      {hasVideoTrack && stats.fps > 0 ? `${stats.fps} fps` : `${settings.frameRate} fps`}
                     </span>
-
-                    {hasVideoTrack && stats.bitrateKbps > 0 && (
-                      <>
-                        <span aria-hidden="true" className="text-slate-300">·</span>
-                        <span className="font-mono tabular-nums">{stats.bitrateKbps} kbps</span>
-                      </>
-                    )}
 
                     {hasVideoTrack && stats.rttMs !== null && (
                       <>
                         <span aria-hidden="true" className="text-slate-300">·</span>
-                        <span className="font-mono tabular-nums">{stats.rttMs} ms RTT</span>
+                        <span className="font-mono tabular-nums">{stats.rttMs} ms</span>
+                      </>
+                    )}
+
+                    {(obsConnected || vcamWebCount > 0) && (
+                      <>
+                        <span aria-hidden="true" className="text-slate-300">·</span>
+                        <span className="font-semibold text-emerald-700">OBS Live</span>
+                      </>
+                    )}
+
+                    {extRelayActive && (
+                      <>
+                        <span aria-hidden="true" className="text-slate-300">·</span>
+                        <span className="font-semibold text-blue-700">Extension Live</span>
                       </>
                     )}
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2">
+                    {/* Instant Speed / Quality Selector */}
+                    <div className="inline-flex items-center p-0.5 rounded-lg bg-slate-100 border border-slate-200/80">
+                      {([
+                        { id: '480p', label: 'Fast 480p' },
+                        { id: '720p', label: 'Smooth 720p' },
+                        { id: '1080p', label: 'Sharp 1080p' },
+                      ] as { id: ResolutionPreset; label: string }[]).map((preset) => (
+                        <button
+                          key={preset.id}
+                          type="button"
+                          onClick={() => updateRemoteSetting({ resolution: preset.id })}
+                          className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors whitespace-nowrap ${
+                            settings.resolution === preset.id
+                              ? 'bg-white text-slate-900 shadow-xs'
+                              : 'text-slate-600 hover:text-slate-900'
+                          }`}
+                        >
+                          {preset.label}
+                        </button>
+                      ))}
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        updateRemoteSetting({
+                          frameRate: settings.frameRate === 60 ? 30 : 60,
+                        })
+                      }
+                      className="px-2.5 py-1.5 rounded-lg text-xs font-mono font-semibold bg-white text-slate-700 border border-slate-200 hover:bg-slate-100 tabular-nums"
+                      title="Toggle 30 / 60 fps"
+                    >
+                      {settings.frameRate} fps
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        updateRemoteSetting({
+                          facingMode: settings.facingMode === 'environment' ? 'user' : 'environment',
+                          deviceId: undefined,
+                          torch: false,
+                          mirror: settings.facingMode === 'environment',
+                        })
+                      }
+                      className="px-2.5 py-1.5 rounded-lg text-xs font-medium bg-white text-slate-700 border border-slate-200 hover:bg-slate-100 transition-colors"
+                    >
+                      {settings.facingMode === 'environment' ? 'Rear' : 'Front'}
+                    </button>
+
                     <button
                       type="button"
                       onClick={() => updateRemoteSetting({ mirror: !settings.mirror })}
-                      className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors inline-flex items-center gap-1.5 ${
+                      className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors inline-flex items-center gap-1.5 ${
                         settings.mirror
                           ? 'bg-slate-900 text-white border-slate-900'
                           : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-100'
@@ -1319,17 +1626,18 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
                       className="px-3 py-1.5 rounded-lg text-xs font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-45 disabled:pointer-events-none inline-flex items-center gap-1.5 transition-colors"
                     >
                       <Camera className="w-3.5 h-3.5" />
-                      <span>Capture Photo</span>
+                      <span>Capture</span>
                     </button>
 
                     <button
                       type="button"
                       onClick={handleFullscreen}
                       disabled={!hasVideoTrack}
-                      className="px-3 py-1.5 rounded-lg text-xs font-medium bg-white text-slate-700 border border-slate-200 hover:bg-slate-100 disabled:opacity-45 disabled:pointer-events-none inline-flex items-center gap-1.5 transition-colors"
+                      className="p-1.5 rounded-lg text-xs font-medium bg-white text-slate-700 border border-slate-200 hover:bg-slate-100 disabled:opacity-45 disabled:pointer-events-none transition-colors"
+                      title="Fullscreen"
+                      aria-label="Fullscreen"
                     >
                       <Maximize2 className="w-3.5 h-3.5" />
-                      <span>Fullscreen</span>
                     </button>
                   </div>
                 </div>
@@ -1386,14 +1694,14 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
                 )}
               </div>
 
-              {/* Right Column: Controls Sidebar */}
+              {/* Right Column: Clean Iriun-Style Quick Connect & Collapsible Adjustments */}
               <aside className="space-y-4">
                 <PWAInstallButton />
 
-                {/* Connection & Pairing Summary */}
+                {/* Quick Connect & Outputs */}
                 <section className="p-5 rounded-xl bg-white border border-slate-200 space-y-4">
                   <div className="flex items-center justify-between">
-                    <h2 className="text-sm font-semibold text-slate-900">Connection</h2>
+                    <h2 className="text-sm font-semibold text-slate-900">Quick Connect</h2>
                     {phoneOnline ? (
                       <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-700">
                         <CheckCircle2 className="w-3.5 h-3.5" />
@@ -1402,414 +1710,416 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
                     ) : (
                       <span className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-500">
                         <WifiOff className="w-3.5 h-3.5" />
-                        <span>No device</span>
+                        <span>Waiting</span>
                       </span>
                     )}
                   </div>
 
-                  <div className="space-y-1.5">
-                    <label
-                      htmlFor="pc-workstation-name"
-                      className="block text-xs font-medium text-slate-600"
-                    >
-                      PC Workstation Label
-                    </label>
-                    <input
-                      id="pc-workstation-name"
-                      type="text"
-                      maxLength={32}
-                      value={pcName}
-                      onChange={(e) => handlePcNameChange(e.target.value)}
-                      placeholder="PC Workstation"
-                      className="w-full px-3 py-2 rounded-lg bg-slate-50 border border-slate-200 text-xs font-medium text-slate-800 focus:border-blue-500 focus:outline-none"
-                    />
-                  </div>
-
-                  {/* Network Address Selector (shows LAN IP when accessed via localhost) */}
-                  {networkInfo && networkInfo.lanIps.length > 0 && (
-                    <div className="space-y-1.5">
-                      <label className="block text-xs font-medium text-slate-600">
-                        Local Network Address
-                      </label>
-                      <select
-                        value={selectedOrigin}
-                        onChange={(e) => setSelectedOrigin(e.target.value)}
-                        className="w-full px-3 py-2 rounded-lg bg-slate-50 border border-slate-200 text-xs font-mono text-slate-800"
-                      >
-                        {networkInfo.lanIps.map((ip) => {
-                          const lanOrigin = `http://${ip}:${networkInfo.port}`;
-                          return (
-                            <option key={ip} value={lanOrigin}>
-                              {lanOrigin} (Wi-Fi LAN)
-                            </option>
-                          );
-                        })}
-                        <option value={window.location.origin}>
-                          {window.location.origin} (Current)
-                        </option>
-                      </select>
-                    </div>
-                  )}
-
-                  <div className="flex items-center justify-between pt-1">
+                  {/* Persistent Room Code + 1-click Copy */}
+                  <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 flex items-center justify-between gap-2">
                     <div>
-                      <div className="text-xs font-medium text-slate-700">
-                        Local-Only WebRTC
-                      </div>
-                      <div className="text-[11px] text-slate-500">
-                        Disable for cross-network testing
+                      <div className="text-[11px] font-medium text-slate-500">Persistent PC Code</div>
+                      <div className="font-mono text-lg font-bold tracking-[0.2em] text-slate-900 tabular-nums">
+                        {pairCode}
                       </div>
                     </div>
                     <button
                       type="button"
-                      role="switch"
-                      aria-checked={localOnlyIce}
-                      onClick={() => setLocalOnlyIce((prev) => !prev)}
-                      className={`w-11 h-6 rounded-full transition-colors p-0.5 ${
-                        localOnlyIce ? 'bg-blue-600' : 'bg-slate-300'
-                      }`}
+                      onClick={handleCopyCode}
+                      className="px-3 py-1.5 rounded-lg bg-white hover:bg-slate-100 border border-slate-200 text-xs font-medium text-slate-700 inline-flex items-center gap-1.5 transition-colors"
                     >
-                      <span
-                        className={`block w-5 h-5 rounded-full bg-white transition-transform ${
-                          localOnlyIce ? 'translate-x-5' : 'translate-x-0'
-                        }`}
-                      />
+                      {copiedCode ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                      <span>{copiedCode ? 'Copied' : 'Copy'}</span>
                     </button>
                   </div>
 
-                  <div className="pt-2 border-t border-slate-100 flex items-center justify-between gap-2">
+                  {/* Instant OBS Studio & Extension Actions */}
+                  <div className="space-y-2">
+                    <button
+                      type="button"
+                      onClick={handleCopyObsUrl}
+                      className="w-full py-2.5 px-3 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold inline-flex items-center justify-center gap-2 transition-colors"
+                    >
+                      {copiedObsUrl ? <Check className="w-3.5 h-3.5" /> : <MonitorPlay className="w-3.5 h-3.5" />}
+                      <span>
+                        {copiedObsUrl
+                          ? 'OBS Browser URL Copied!'
+                          : obsConnected || vcamWebCount > 0
+                            ? 'OBS Connected — Copy URL'
+                            : 'Copy OBS Browser Source URL'}
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab('virtual-cam')}
+                      className="w-full py-2 px-3 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-medium inline-flex items-center justify-center gap-2 transition-colors"
+                    >
+                      <Video className="w-3.5 h-3.5" />
+                      <span>
+                        {extRelayActive
+                          ? 'Chrome Extension: Streaming'
+                          : extConnected
+                            ? 'Chrome Extension: Linked'
+                            : 'Open OBS & Virtual Cam Setup'}
+                      </span>
+                    </button>
+                  </div>
+
+                  {phoneOnline && (
+                    <button
+                      type="button"
+                      onClick={requestPhoneRestart}
+                      className="w-full py-2 px-3 rounded-lg bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 text-xs font-medium inline-flex items-center justify-center gap-1.5 transition-colors"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      <span>Reconnect Stream</span>
+                    </button>
+                  )}
+
+                  <div className="pt-2 border-t border-slate-100">
                     <button
                       type="button"
                       onClick={() => onOpenPhoneMode(pairCode)}
-                      className="w-full py-2 px-3 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-medium inline-flex items-center justify-center gap-2 transition-colors"
+                      className="w-full py-2 px-3 rounded-lg bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 text-xs font-medium inline-flex items-center justify-center gap-2 transition-colors"
                     >
                       <Smartphone className="w-3.5 h-3.5" />
-                      <span>Switch to Smartphone Mode</span>
+                      <span>Switch to Phone Camera Mode</span>
                     </button>
                   </div>
                 </section>
 
-                {/* Camera & Video Controls */}
-                <section className="p-5 rounded-xl bg-white border border-slate-200 space-y-5">
-                  <div className="flex items-center justify-between">
-                    <h2 className="text-sm font-semibold text-slate-900">
-                      Camera &amp; Video Controls
-                    </h2>
-                    {phoneOnline && (
-                      <button
-                        type="button"
-                        onClick={requestPhoneRestart}
-                        className="text-xs font-medium text-blue-600 hover:text-blue-700 inline-flex items-center gap-1"
-                        title="Renegotiate stream"
-                      >
-                        <RefreshCw className="w-3 h-3" />
-                        <span>Refresh</span>
-                      </button>
-                    )}
-                  </div>
-
-                  {/* Front / Rear Camera Switch */}
-                  <div className="space-y-1.5">
-                    <span className="block text-xs font-medium text-slate-600">
-                      Smartphone Camera
+                {/* Collapsible Advanced Camera Adjustments */}
+                <section className="rounded-xl bg-white border border-slate-200 overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => setAdjustmentsOpen((prev) => !prev)}
+                    className="w-full px-5 py-4 flex items-center justify-between text-left hover:bg-slate-50 transition-colors"
+                  >
+                    <span className="inline-flex items-center gap-2 text-sm font-semibold text-slate-900">
+                      <SlidersHorizontal className="w-4 h-4 text-slate-500" />
+                      <span>Camera Adjustments</span>
                     </span>
-                    <div className="grid grid-cols-2 gap-1.5 p-1 rounded-lg bg-slate-100">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          updateRemoteSetting({
-                            facingMode: 'environment',
-                            deviceId: undefined,
-                            mirror: false,
-                          })
-                        }
-                        className={`py-2 rounded-md text-xs font-semibold transition-colors ${
-                          settings.facingMode === 'environment'
-                            ? 'bg-white text-slate-900 shadow-xs'
-                            : 'text-slate-600 hover:text-slate-900'
-                        }`}
-                      >
-                        Rear Camera
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          updateRemoteSetting({
-                            facingMode: 'user',
-                            deviceId: undefined,
-                            torch: false,
-                            mirror: true,
-                          })
-                        }
-                        className={`py-2 rounded-md text-xs font-semibold transition-colors ${
-                          settings.facingMode === 'user'
-                            ? 'bg-white text-slate-900 shadow-xs'
-                            : 'text-slate-600 hover:text-slate-900'
-                        }`}
-                      >
-                        Front Camera
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Multi-lens selector when phone exposes multiple cameras */}
-                  {capabilities && capabilities.devices.length > 1 && (
-                    <div className="space-y-1.5">
-                      <label className="block text-xs font-medium text-slate-600">
-                        Specific Lens
-                      </label>
-                      <select
-                        value={settings.deviceId || ''}
-                        onChange={(e) =>
-                          updateRemoteSetting({ deviceId: e.target.value || undefined })
-                        }
-                        className="w-full px-3 py-2 rounded-lg bg-slate-50 border border-slate-200 text-xs text-slate-800"
-                      >
-                        <option value="">
-                          Auto ({settings.facingMode === 'environment' ? 'Rear' : 'Front'})
-                        </option>
-                        {capabilities.devices.map((dev) => (
-                          <option key={dev.deviceId} value={dev.deviceId}>
-                            {dev.label}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  )}
-
-                  {/* Resolution */}
-                  <div className="space-y-1.5">
-                    <span className="block text-xs font-medium text-slate-600">Resolution</span>
-                    <div className="grid grid-cols-3 gap-1.5 p-1 rounded-lg bg-slate-100">
-                      {(['480p', '720p', '1080p'] as ResolutionPreset[]).map((res) => (
-                        <button
-                          key={res}
-                          type="button"
-                          onClick={() => updateRemoteSetting({ resolution: res })}
-                          className={`py-2 rounded-md text-xs font-semibold font-mono transition-colors ${
-                            settings.resolution === res
-                              ? 'bg-white text-slate-900 shadow-xs'
-                              : 'text-slate-600 hover:text-slate-900'
-                          }`}
-                        >
-                          {res}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Frame Rate */}
-                  <div className="space-y-1.5">
-                    <span className="block text-xs font-medium text-slate-600">Frame Rate</span>
-                    <div className="grid grid-cols-4 gap-1.5 p-1 rounded-lg bg-slate-100">
-                      {([15, 24, 30, 60] as FrameRatePreset[]).map((fps) => (
-                        <button
-                          key={fps}
-                          type="button"
-                          onClick={() => updateRemoteSetting({ frameRate: fps })}
-                          className={`py-2 rounded-md text-xs font-semibold font-mono tabular-nums transition-colors ${
-                            settings.frameRate === fps
-                              ? 'bg-white text-slate-900 shadow-xs'
-                              : 'text-slate-600 hover:text-slate-900'
-                          }`}
-                        >
-                          {fps}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Zoom (Hardware + Digital) */}
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="font-medium text-slate-600">Zoom</span>
-                      <span className="font-mono tabular-nums text-slate-800">
-                        {totalZoom.toFixed(1)}×
-                      </span>
-                    </div>
-                    <input
-                      type="range"
-                      min={1}
-                      max={8}
-                      step={0.1}
-                      value={totalZoom}
-                      onChange={(e) => handleSetTotalZoom(Number(e.target.value))}
-                      className="w-full lens-slider"
-                    />
-                  </div>
-
-                  {/* Focus */}
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-medium text-slate-600">Focus</span>
-                      <div className="flex gap-1 bg-slate-100 p-0.5 rounded-lg">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            updateRemoteSetting({ focusMode: 'continuous' });
-                            sendWs({ type: 'camera:trigger-focus' });
-                            focusNonceRef.current += 1;
-                            void updatePcRoomFields(pairCodeRef.current, {
-                              focusNonce: focusNonceRef.current,
-                              focusX: 0.5,
-                              focusY: 0.5,
-                            });
-                          }}
-                          className={`px-2.5 py-1 rounded-md text-xs font-medium ${
-                            settings.focusMode === 'continuous'
-                              ? 'bg-white text-slate-900 shadow-xs'
-                              : 'text-slate-600'
-                          }`}
-                        >
-                          Auto
-                        </button>
-                        <button
-                          type="button"
-                          disabled={
-                            phoneOnline &&
-                            capabilities?.focusModes !== undefined &&
-                            !capabilities.focusModes.includes('manual')
-                          }
-                          onClick={() => updateRemoteSetting({ focusMode: 'manual' })}
-                          className={`px-2.5 py-1 rounded-md text-xs font-medium disabled:opacity-40 ${
-                            settings.focusMode === 'manual'
-                              ? 'bg-white text-slate-900 shadow-xs'
-                              : 'text-slate-600'
-                          }`}
-                        >
-                          Manual
-                        </button>
-                      </div>
-                    </div>
-                    {settings.focusMode === 'manual' && (
-                      <input
-                        type="range"
-                        min={0}
-                        max={1}
-                        step={0.01}
-                        value={settings.focusDistance}
-                        onChange={(e) =>
-                          updateRemoteSetting({ focusDistance: Number(e.target.value) })
-                        }
-                        className="w-full lens-slider"
-                        aria-label="Manual focus distance"
-                      />
+                    {adjustmentsOpen ? (
+                      <ChevronUp className="w-4 h-4 text-slate-500" />
+                    ) : (
+                      <ChevronDown className="w-4 h-4 text-slate-500" />
                     )}
-                  </div>
+                  </button>
 
-                  {/* Exposure EV when supported */}
-                  {capabilities?.exposureCompensation && (
-                    <div className="space-y-1.5">
-                      <div className="flex items-center justify-between text-xs">
-                        <span className="font-medium text-slate-600">Exposure (EV)</span>
-                        <span className="font-mono tabular-nums text-slate-800">
-                          {settings.exposureCompensation > 0 ? '+' : ''}
-                          {settings.exposureCompensation.toFixed(1)} EV
-                        </span>
+                  {adjustmentsOpen && (
+                    <div className="px-5 pb-5 pt-2 border-t border-slate-100 space-y-5">
+                      {/* PC Workstation Label */}
+                      <div className="space-y-1.5">
+                        <label
+                          htmlFor="pc-workstation-name"
+                          className="block text-xs font-medium text-slate-600"
+                        >
+                          PC Label
+                        </label>
+                        <input
+                          id="pc-workstation-name"
+                          type="text"
+                          maxLength={32}
+                          value={pcName}
+                          onChange={(e) => handlePcNameChange(e.target.value)}
+                          placeholder="PC Workstation"
+                          className="w-full px-3 py-2 rounded-lg bg-slate-50 border border-slate-200 text-xs font-medium text-slate-800 focus:border-blue-500 focus:outline-none"
+                        />
                       </div>
-                      <input
-                        type="range"
-                        min={capabilities.exposureCompensation.min}
-                        max={capabilities.exposureCompensation.max}
-                        step={capabilities.exposureCompensation.step || 0.25}
-                        value={settings.exposureCompensation}
-                        onChange={(e) =>
-                          updateRemoteSetting({
-                            exposureCompensation: Number(e.target.value),
-                          })
-                        }
-                        className="w-full lens-slider"
-                      />
+
+                      {/* Network Address Selector (shows LAN IP when accessed via localhost) */}
+                      {networkInfo && networkInfo.lanIps.length > 0 && (
+                        <div className="space-y-1.5">
+                          <label className="block text-xs font-medium text-slate-600">
+                            Local Network Address
+                          </label>
+                          <select
+                            value={selectedOrigin}
+                            onChange={(e) => setSelectedOrigin(e.target.value)}
+                            className="w-full px-3 py-2 rounded-lg bg-slate-50 border border-slate-200 text-xs font-mono text-slate-800"
+                          >
+                            {networkInfo.lanIps.map((ip) => {
+                              const lanOrigin = `http://${ip}:${networkInfo.port}`;
+                              return (
+                                <option key={ip} value={lanOrigin}>
+                                  {lanOrigin} (Wi-Fi LAN)
+                                </option>
+                              );
+                            })}
+                            <option value={window.location.origin}>
+                              {window.location.origin} (Current)
+                            </option>
+                          </select>
+                        </div>
+                      )}
+
+                      {/* Multi-lens selector when phone exposes multiple cameras */}
+                      {capabilities && capabilities.devices.length > 1 && (
+                        <div className="space-y-1.5">
+                          <label className="block text-xs font-medium text-slate-600">
+                            Specific Lens
+                          </label>
+                          <select
+                            value={settings.deviceId || ''}
+                            onChange={(e) =>
+                              updateRemoteSetting({ deviceId: e.target.value || undefined })
+                            }
+                            className="w-full px-3 py-2 rounded-lg bg-slate-50 border border-slate-200 text-xs text-slate-800"
+                          >
+                            <option value="">
+                              Auto ({settings.facingMode === 'environment' ? 'Rear' : 'Front'})
+                            </option>
+                            {capabilities.devices.map((dev) => (
+                              <option key={dev.deviceId} value={dev.deviceId}>
+                                {dev.label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+
+                      {/* Frame Rate Presets */}
+                      <div className="space-y-1.5">
+                        <span className="block text-xs font-medium text-slate-600">Frame Rate</span>
+                        <div className="grid grid-cols-4 gap-1.5 p-1 rounded-lg bg-slate-100">
+                          {([15, 24, 30, 60] as FrameRatePreset[]).map((fps) => (
+                            <button
+                              key={fps}
+                              type="button"
+                              onClick={() => updateRemoteSetting({ frameRate: fps })}
+                              className={`py-1.5 rounded-md text-xs font-semibold font-mono tabular-nums transition-colors ${
+                                settings.frameRate === fps
+                                  ? 'bg-white text-slate-900 shadow-xs'
+                                  : 'text-slate-600 hover:text-slate-900'
+                              }`}
+                            >
+                              {fps}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Zoom (Hardware + Digital) */}
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="font-medium text-slate-600">Zoom</span>
+                          <span className="font-mono tabular-nums text-slate-800">
+                            {totalZoom.toFixed(1)}×
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min={1}
+                          max={8}
+                          step={0.1}
+                          value={totalZoom}
+                          onChange={(e) => handleSetTotalZoom(Number(e.target.value))}
+                          className="w-full lens-slider"
+                        />
+                      </div>
+
+                      {/* Focus */}
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-medium text-slate-600">Focus</span>
+                          <div className="flex gap-1 bg-slate-100 p-0.5 rounded-lg">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                updateRemoteSetting({ focusMode: 'continuous' });
+                                sendWs({ type: 'camera:trigger-focus' });
+                                focusNonceRef.current += 1;
+                                void updatePcRoomFields(pairCodeRef.current, {
+                                  focusNonce: focusNonceRef.current,
+                                  focusX: 0.5,
+                                  focusY: 0.5,
+                                });
+                              }}
+                              className={`px-2.5 py-1 rounded-md text-xs font-medium ${
+                                settings.focusMode === 'continuous'
+                                  ? 'bg-white text-slate-900 shadow-xs'
+                                  : 'text-slate-600'
+                              }`}
+                            >
+                              Auto
+                            </button>
+                            <button
+                              type="button"
+                              disabled={
+                                phoneOnline &&
+                                capabilities?.focusModes !== undefined &&
+                                !capabilities.focusModes.includes('manual')
+                              }
+                              onClick={() => updateRemoteSetting({ focusMode: 'manual' })}
+                              className={`px-2.5 py-1 rounded-md text-xs font-medium disabled:opacity-40 ${
+                                settings.focusMode === 'manual'
+                                  ? 'bg-white text-slate-900 shadow-xs'
+                                  : 'text-slate-600'
+                              }`}
+                            >
+                              Manual
+                            </button>
+                          </div>
+                        </div>
+                        {settings.focusMode === 'manual' && (
+                          <input
+                            type="range"
+                            min={0}
+                            max={1}
+                            step={0.01}
+                            value={settings.focusDistance}
+                            onChange={(e) =>
+                              updateRemoteSetting({ focusDistance: Number(e.target.value) })
+                            }
+                            className="w-full lens-slider"
+                            aria-label="Manual focus distance"
+                          />
+                        )}
+                      </div>
+
+                      {/* Exposure EV when supported */}
+                      {capabilities?.exposureCompensation && (
+                        <div className="space-y-1.5">
+                          <div className="flex items-center justify-between text-xs">
+                            <span className="font-medium text-slate-600">Exposure (EV)</span>
+                            <span className="font-mono tabular-nums text-slate-800">
+                              {settings.exposureCompensation > 0 ? '+' : ''}
+                              {settings.exposureCompensation.toFixed(1)} EV
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min={capabilities.exposureCompensation.min}
+                            max={capabilities.exposureCompensation.max}
+                            step={capabilities.exposureCompensation.step || 0.25}
+                            value={settings.exposureCompensation}
+                            onChange={(e) =>
+                              updateRemoteSetting({
+                                exposureCompensation: Number(e.target.value),
+                              })
+                            }
+                            className="w-full lens-slider"
+                          />
+                        </div>
+                      )}
+
+                      {/* Brightness */}
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="font-medium text-slate-600">Brightness</span>
+                          <span className="font-mono tabular-nums text-slate-800">
+                            {settings.brightness > 0 ? '+' : ''}
+                            {settings.brightness}%
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min={-50}
+                          max={50}
+                          step={5}
+                          value={settings.brightness}
+                          onChange={(e) =>
+                            updateRemoteSetting({ brightness: Number(e.target.value) })
+                          }
+                          className="w-full lens-slider"
+                        />
+                      </div>
+
+                      {/* Contrast */}
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="font-medium text-slate-600">Contrast</span>
+                          <span className="font-mono tabular-nums text-slate-800">
+                            {100 + settings.contrast}%
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min={-50}
+                          max={100}
+                          step={5}
+                          value={settings.contrast}
+                          onChange={(e) =>
+                            updateRemoteSetting({ contrast: Number(e.target.value) })
+                          }
+                          className="w-full lens-slider"
+                        />
+                      </div>
+
+                      {/* High-Contrast B&W + Reset */}
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updateRemoteSetting({
+                              grayscale: !settings.grayscale,
+                              contrast:
+                                !settings.grayscale && settings.contrast < 25 ? 30 : settings.contrast,
+                            })
+                          }
+                          className={`flex-1 py-2 px-3 rounded-lg text-xs font-semibold border transition-colors ${
+                            settings.grayscale
+                              ? 'bg-slate-900 border-slate-900 text-white'
+                              : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'
+                          }`}
+                        >
+                          High-Contrast B&amp;W
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleResetAdjustments}
+                          className="py-2 px-3 rounded-lg text-xs font-medium border border-slate-200 text-slate-600 hover:bg-slate-100 inline-flex items-center gap-1"
+                          title="Reset image adjustments"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5" />
+                          <span>Reset</span>
+                        </button>
+                      </div>
+
+                      {/* Torch toggle when rear camera supports flash */}
+                      {capabilities?.torch && settings.facingMode === 'environment' && (
+                        <button
+                          type="button"
+                          onClick={() => updateRemoteSetting({ torch: !settings.torch })}
+                          className={`w-full py-2 px-3 rounded-lg text-xs font-semibold border inline-flex items-center justify-center gap-2 transition-colors ${
+                            settings.torch
+                              ? 'bg-amber-50 border-amber-300 text-amber-900'
+                              : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'
+                          }`}
+                        >
+                          <Flashlight className="w-3.5 h-3.5" />
+                          <span>{settings.torch ? 'Flashlight On' : 'Turn On Flashlight'}</span>
+                        </button>
+                      )}
+
+                      {/* Local-Only WebRTC toggle */}
+                      <div className="flex items-center justify-between pt-2 border-t border-slate-100">
+                        <div>
+                          <div className="text-xs font-medium text-slate-700">
+                            Local-Only WebRTC
+                          </div>
+                          <div className="text-[11px] text-slate-500">
+                            Leave off for best router compatibility
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={localOnlyIce}
+                          onClick={() => setLocalOnlyIce((prev) => !prev)}
+                          className={`w-11 h-6 rounded-full transition-colors p-0.5 ${
+                            localOnlyIce ? 'bg-blue-600' : 'bg-slate-300'
+                          }`}
+                        >
+                          <span
+                            className={`block w-5 h-5 rounded-full bg-white transition-transform ${
+                              localOnlyIce ? 'translate-x-5' : 'translate-x-0'
+                            }`}
+                          />
+                        </button>
+                      </div>
                     </div>
-                  )}
-
-                  {/* Brightness */}
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="font-medium text-slate-600">Brightness</span>
-                      <span className="font-mono tabular-nums text-slate-800">
-                        {settings.brightness > 0 ? '+' : ''}
-                        {settings.brightness}%
-                      </span>
-                    </div>
-                    <input
-                      type="range"
-                      min={-50}
-                      max={50}
-                      step={5}
-                      value={settings.brightness}
-                      onChange={(e) =>
-                        updateRemoteSetting({ brightness: Number(e.target.value) })
-                      }
-                      className="w-full lens-slider"
-                    />
-                  </div>
-
-                  {/* Contrast */}
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="font-medium text-slate-600">Contrast</span>
-                      <span className="font-mono tabular-nums text-slate-800">
-                        {100 + settings.contrast}%
-                      </span>
-                    </div>
-                    <input
-                      type="range"
-                      min={-50}
-                      max={100}
-                      step={5}
-                      value={settings.contrast}
-                      onChange={(e) =>
-                        updateRemoteSetting({ contrast: Number(e.target.value) })
-                      }
-                      className="w-full lens-slider"
-                    />
-                  </div>
-
-                  {/* HUID High-Contrast B&W + Reset */}
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        updateRemoteSetting({
-                          grayscale: !settings.grayscale,
-                          contrast:
-                            !settings.grayscale && settings.contrast < 25 ? 30 : settings.contrast,
-                        })
-                      }
-                      className={`flex-1 py-2 px-3 rounded-lg text-xs font-semibold border transition-colors ${
-                        settings.grayscale
-                          ? 'bg-slate-900 border-slate-900 text-white'
-                          : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'
-                      }`}
-                    >
-                      High-Contrast B&amp;W
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleResetAdjustments}
-                      className="py-2 px-3 rounded-lg text-xs font-medium border border-slate-200 text-slate-600 hover:bg-slate-100 inline-flex items-center gap-1"
-                      title="Reset image adjustments"
-                    >
-                      <RotateCcw className="w-3.5 h-3.5" />
-                      <span>Reset</span>
-                    </button>
-                  </div>
-
-                  {/* Torch toggle when rear camera supports flash */}
-                  {capabilities?.torch && settings.facingMode === 'environment' && (
-                    <button
-                      type="button"
-                      onClick={() => updateRemoteSetting({ torch: !settings.torch })}
-                      className={`w-full py-2 px-3 rounded-lg text-xs font-semibold border inline-flex items-center justify-center gap-2 transition-colors ${
-                        settings.torch
-                          ? 'bg-amber-50 border-amber-300 text-amber-900'
-                          : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'
-                      }`}
-                    >
-                      <Flashlight className="w-3.5 h-3.5" />
-                      <span>{settings.torch ? 'Flashlight On' : 'Turn On Flashlight'}</span>
-                    </button>
                   )}
                 </section>
               </aside>
@@ -1821,6 +2131,7 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
               vcamBridgeCount={vcamBridgeCount}
               extConnected={extConnected}
               extRelayActive={extRelayActive}
+              obsConnected={obsConnected}
               vcamWebCount={vcamWebCount}
               vcamWebFrameCount={vcamWebFrameCount}
               bridgeStreamEnabled={bridgeStreamEnabled}

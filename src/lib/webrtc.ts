@@ -540,25 +540,90 @@ export async function captureProcessedPhoto(options: {
   };
 }
 
+export function preferHardwareVideoCodec(pc: RTCPeerConnection): void {
+  try {
+    if (typeof RTCRtpSender === 'undefined' || typeof RTCRtpSender.getCapabilities !== 'function') {
+      return;
+    }
+    const caps = RTCRtpSender.getCapabilities('video');
+    if (!caps || !Array.isArray(caps.codecs) || caps.codecs.length === 0) return;
+
+    const h264: RTCRtpCodec[] = [];
+    const vp8: RTCRtpCodec[] = [];
+    const rest: RTCRtpCodec[] = [];
+
+    for (const codec of caps.codecs) {
+      const mime = (codec.mimeType || '').toLowerCase();
+      if (mime === 'video/h264') {
+        h264.push(codec);
+      } else if (mime === 'video/vp8') {
+        vp8.push(codec);
+      } else {
+        rest.push(codec);
+      }
+    }
+
+    const ordered = [...h264, ...vp8, ...rest];
+    for (const transceiver of pc.getTransceivers()) {
+      const kind =
+        transceiver.sender?.track?.kind || transceiver.receiver?.track?.kind;
+      if (kind === 'video' && typeof transceiver.setCodecPreferences === 'function') {
+        transceiver.setCodecPreferences(ordered);
+      }
+    }
+  } catch {
+    // Codec preference selection is optional per browser
+  }
+}
+
+export function applyLowLatencyReceiver(pc: RTCPeerConnection): void {
+  try {
+    for (const receiver of pc.getReceivers()) {
+      if (receiver.track?.kind !== 'video') continue;
+      const ext = receiver as RTCRtpReceiver & {
+        playoutDelayHint?: number;
+        jitterBufferTarget?: number;
+      };
+      if ('playoutDelayHint' in ext) {
+        ext.playoutDelayHint = 0;
+      }
+      if ('jitterBufferTarget' in ext) {
+        ext.jitterBufferTarget = 0;
+      }
+    }
+  } catch {
+    // Low-latency receiver hints are optional per browser
+  }
+}
+
 export async function tuneVideoSender(
   sender: RTCRtpSender | undefined,
   settings: CameraSettings
 ): Promise<void> {
   if (!sender || typeof sender.getParameters !== 'function') return;
   try {
+    if (sender.track && 'contentHint' in sender.track) {
+      sender.track.contentHint = 'motion';
+    }
     const params = sender.getParameters();
     if (!params.encodings || params.encodings.length === 0) {
       params.encodings = [{}];
     }
     const maxBitrate =
       settings.resolution === '1080p'
-        ? 5_000_000
+        ? 4_200_000
         : settings.resolution === '720p'
-          ? 2_800_000
+          ? 2_500_000
           : 1_200_000;
     params.encodings[0].maxBitrate = maxBitrate;
     params.encodings[0].maxFramerate = settings.frameRate;
-    params.degradationPreference = 'maintain-resolution';
+    params.encodings[0].scaleResolutionDownBy = 1;
+    const extEncoding = params.encodings[0] as RTCRtpEncodingParameters & {
+      networkPriority?: 'very-low' | 'low' | 'medium' | 'high';
+    };
+    extEncoding.networkPriority = 'high';
+    // Prioritize smooth, lag-free framerate over heavy frames when Wi-Fi fluctuates
+    params.degradationPreference = 'maintain-framerate';
     await sender.setParameters(params);
   } catch {
     // Ignore on browsers that don't allow dynamic sender parameters

@@ -49,7 +49,42 @@
   let activeStreams = 0;
   let idleDrawTimer = null;
   let decodingFrame = false;
+  let pendingDataUrl = null;
   const frameImg = new Image();
+
+  function drawFrameDataUrl(dataUrl) {
+    if (activeStreams <= 0 || !ctx) {
+      decodingFrame = false;
+      pendingDataUrl = null;
+      return;
+    }
+    decodingFrame = true;
+    frameImg.onload = () => {
+      if (frameImg.naturalWidth > 0 && frameImg.naturalHeight > 0) {
+        if (
+          canvas.width !== frameImg.naturalWidth ||
+          canvas.height !== frameImg.naturalHeight
+        ) {
+          canvas.width = frameImg.naturalWidth;
+          canvas.height = frameImg.naturalHeight;
+        }
+        ctx.drawImage(frameImg, 0, 0, canvas.width, canvas.height);
+        lastFrameAt = Date.now();
+      }
+      if (pendingDataUrl) {
+        const nextUrl = pendingDataUrl;
+        pendingDataUrl = null;
+        drawFrameDataUrl(nextUrl);
+      } else {
+        decodingFrame = false;
+      }
+    };
+    frameImg.onerror = () => {
+      decodingFrame = false;
+      pendingDataUrl = null;
+    };
+    frameImg.src = dataUrl;
+  }
 
   function drawWaitingCard() {
     if (!ctx) return;
@@ -104,26 +139,13 @@
     } else if (msg.type === 'status' && msg.state) {
       statusText = msg.state.message || statusText;
     } else if (msg.type === 'frame' && typeof msg.dataUrl === 'string') {
-      if (activeStreams <= 0 || decodingFrame || !ctx) return;
-      decodingFrame = true;
-      frameImg.onload = () => {
-        decodingFrame = false;
-        if (frameImg.naturalWidth > 0 && frameImg.naturalHeight > 0) {
-          if (
-            canvas.width !== frameImg.naturalWidth ||
-            canvas.height !== frameImg.naturalHeight
-          ) {
-            canvas.width = frameImg.naturalWidth;
-            canvas.height = frameImg.naturalHeight;
-          }
-          ctx.drawImage(frameImg, 0, 0, canvas.width, canvas.height);
-          lastFrameAt = Date.now();
-        }
-      };
-      frameImg.onerror = () => {
-        decodingFrame = false;
-      };
-      frameImg.src = msg.dataUrl;
+      if (activeStreams <= 0 || !ctx) return;
+      if (decodingFrame) {
+        // Always keep only the newest frame to guarantee zero latency buildup
+        pendingDataUrl = msg.dataUrl;
+        return;
+      }
+      drawFrameDataUrl(msg.dataUrl);
     }
   });
 

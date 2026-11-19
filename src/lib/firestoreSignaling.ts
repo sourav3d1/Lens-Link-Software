@@ -279,3 +279,154 @@ export function subscribeToRoom(
     }
   );
 }
+
+export interface FirestoreObsViewerDoc {
+  viewerId: 'obs-primary';
+  roomCode: string;
+  requestNonce: number;
+  offerId: string;
+  offerSdp: string;
+  answerForOfferId: string;
+  answerSdp: string;
+  pcIceCandidates: string[];
+  viewerIceCandidates: string[];
+}
+
+const OBS_VIEWER_ID = 'obs-primary' as const;
+
+export async function requestObsViewerStream(code: string): Promise<boolean> {
+  const cleanCode = code.trim().toUpperCase();
+  if (!ROOM_CODE_RE.test(cleanCode)) return false;
+
+  const docPath = `webrtc_rooms/${cleanCode}/viewers/${OBS_VIEWER_ID}`;
+  const viewerRef = doc(db, 'webrtc_rooms', cleanCode, 'viewers', OBS_VIEWER_ID);
+
+  try {
+    const snap = await getDoc(viewerRef);
+    if (snap.exists()) {
+      const prevNonce = typeof snap.data().requestNonce === 'number' ? snap.data().requestNonce : 0;
+      const nextNonce = prevNonce >= 999999 ? 1 : prevNonce + 1;
+      await updateDoc(viewerRef, {
+        requestNonce: nextNonce,
+        answerForOfferId: '',
+        answerSdp: '',
+        viewerIceCandidates: [],
+        updatedAt: serverTimestamp(),
+      });
+      return true;
+    }
+
+    await setDoc(viewerRef, {
+      viewerId: OBS_VIEWER_ID,
+      roomCode: cleanCode,
+      requestNonce: 1,
+      offerId: '',
+      offerSdp: '',
+      answerForOfferId: '',
+      answerSdp: '',
+      pcIceCandidates: [],
+      viewerIceCandidates: [],
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+    return true;
+  } catch (error) {
+    if (error instanceof Error && error.message.toLowerCase().includes('permission')) {
+      handleFirestoreError(error, OperationType.WRITE, docPath);
+    }
+    return false;
+  }
+}
+
+export async function updateObsViewerFromPc(
+  code: string,
+  fields: Partial<{
+    offerId: string;
+    offerSdp: string;
+    pcIceCandidates: string[];
+  }>
+): Promise<boolean> {
+  const cleanCode = code.trim().toUpperCase();
+  if (!ROOM_CODE_RE.test(cleanCode)) return false;
+
+  const docPath = `webrtc_rooms/${cleanCode}/viewers/${OBS_VIEWER_ID}`;
+  const payload: Record<string, unknown> = { updatedAt: serverTimestamp() };
+  if (typeof fields.offerId === 'string') payload.offerId = fields.offerId.slice(0, 64);
+  if (typeof fields.offerSdp === 'string') payload.offerSdp = fields.offerSdp.slice(0, 25000);
+  if (Array.isArray(fields.pcIceCandidates)) {
+    payload.pcIceCandidates = fields.pcIceCandidates.slice(0, 24);
+  }
+
+  try {
+    await updateDoc(doc(db, 'webrtc_rooms', cleanCode, 'viewers', OBS_VIEWER_ID), payload);
+    return true;
+  } catch (error) {
+    if (error instanceof Error && error.message.toLowerCase().includes('permission')) {
+      handleFirestoreError(error, OperationType.UPDATE, docPath);
+    }
+    return false;
+  }
+}
+
+export async function updateObsViewerFromClient(
+  code: string,
+  fields: Partial<{
+    requestNonce: number;
+    answerForOfferId: string;
+    answerSdp: string;
+    viewerIceCandidates: string[];
+  }>
+): Promise<boolean> {
+  const cleanCode = code.trim().toUpperCase();
+  if (!ROOM_CODE_RE.test(cleanCode)) return false;
+
+  const docPath = `webrtc_rooms/${cleanCode}/viewers/${OBS_VIEWER_ID}`;
+  const payload: Record<string, unknown> = { updatedAt: serverTimestamp() };
+  if (typeof fields.requestNonce === 'number') {
+    payload.requestNonce = Math.max(0, Math.min(1000000, Math.floor(fields.requestNonce)));
+  }
+  if (typeof fields.answerForOfferId === 'string') {
+    payload.answerForOfferId = fields.answerForOfferId.slice(0, 64);
+  }
+  if (typeof fields.answerSdp === 'string') {
+    payload.answerSdp = fields.answerSdp.slice(0, 25000);
+  }
+  if (Array.isArray(fields.viewerIceCandidates)) {
+    payload.viewerIceCandidates = fields.viewerIceCandidates.slice(0, 24);
+  }
+
+  try {
+    await updateDoc(doc(db, 'webrtc_rooms', cleanCode, 'viewers', OBS_VIEWER_ID), payload);
+    return true;
+  } catch (error) {
+    if (error instanceof Error && error.message.toLowerCase().includes('permission')) {
+      handleFirestoreError(error, OperationType.UPDATE, docPath);
+    }
+    return false;
+  }
+}
+
+export function subscribeToObsViewer(
+  code: string,
+  onData: (viewer: FirestoreObsViewerDoc | null) => void,
+  onError?: (err: Error) => void
+): Unsubscribe {
+  const cleanCode = code.trim().toUpperCase();
+  const docPath = `webrtc_rooms/${cleanCode}/viewers/${OBS_VIEWER_ID}`;
+  return onSnapshot(
+    doc(db, 'webrtc_rooms', cleanCode, 'viewers', OBS_VIEWER_ID),
+    (snap) => {
+      if (!snap.exists()) {
+        onData(null);
+        return;
+      }
+      onData(snap.data() as FirestoreObsViewerDoc);
+    },
+    (error) => {
+      if (error.message.toLowerCase().includes('permission')) {
+        handleFirestoreError(error, OperationType.GET, docPath);
+      }
+      onError?.(error);
+    }
+  );
+}

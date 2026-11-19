@@ -33,7 +33,7 @@ export const BUNDLE_CATALOG: BundleCatalogEntry[] = [
     filename: 'lenslink-browser-webcam.zip',
     apiPath: '/api/browser-cam/bundle',
     staticPath: '/downloads/lenslink-browser-webcam.zip',
-    version: '1.1.0',
+    version: '1.2.0',
   },
   {
     bundleId: 'windows-vcam',

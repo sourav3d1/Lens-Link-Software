@@ -51,6 +51,9 @@ export default defineConfig(() => {
           ],
         },
         workbox: {
+          skipWaiting: true,
+          clientsClaim: true,
+          cleanupOutdatedCaches: true,
           maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
           navigateFallback: '/index.html',
@@ -61,6 +64,14 @@ export default defineConfig(() => {
             /^\/phone-manifest\.webmanifest$/,
           ],
           runtimeCaching: [
+            {
+              urlPattern: ({ request }) => request.mode === 'navigate',
+              handler: 'NetworkFirst',
+              options: {
+                cacheName: 'pages-cache',
+                networkTimeoutSeconds: 3,
+              },
+            },
             {
               urlPattern: ({ url }) =>
                 url.pathname.startsWith('/api/') || url.pathname.startsWith('/downloads/'),

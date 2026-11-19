@@ -24,6 +24,10 @@ service cloud.firestore {
         && code.matches('^[A-Z0-9]{6}$');
     }
 
+    function isObsViewerId(viewerId) {
+      return isValidId(viewerId) && viewerId == 'obs-primary';
+    }
+
     function incoming() {
       return request.resource.data;
     }
@@ -206,6 +210,56 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidVcamViewer(data, roomCode, viewerId) {
+      return data.keys().hasAll([
+          'viewerId',
+          'roomCode',
+          'requestNonce',
+          'offerId',
+          'offerSdp',
+          'answerForOfferId',
+          'answerSdp',
+          'pcIceCandidates',
+          'viewerIceCandidates',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'viewerId',
+          'roomCode',
+          'requestNonce',
+          'offerId',
+          'offerSdp',
+          'answerForOfferId',
+          'answerSdp',
+          'pcIceCandidates',
+          'viewerIceCandidates',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.viewerId is string
+        && data.viewerId == viewerId
+        && isObsViewerId(data.viewerId)
+        && data.roomCode is string
+        && data.roomCode == roomCode
+        && isRoomCode(data.roomCode)
+        && data.requestNonce is int
+        && data.requestNonce >= 0
+        && data.requestNonce <= 1000000
+        && data.offerId is string
+        && data.offerId.size() <= 64
+        && data.offerSdp is string
+        && data.offerSdp.size() <= 25000
+        && data.answerForOfferId is string
+        && data.answerForOfferId.size() <= 64
+        && data.answerSdp is string
+        && data.answerSdp.size() <= 25000
+        && isValidIceList(data.pcIceCandidates)
+        && isValidIceList(data.viewerIceCandidates)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
     match /download_bundles/{bundleId} {
       // Public read-only single-document get by canonical bundle ID (zero PII)
       allow get: if isCanonicalBundleId(bundleId);
@@ -238,7 +292,7 @@ service cloud.firestore {
     }
 
     match /webrtc_rooms/{roomCode} {
-      // Ephemeral WebRTC signaling rooms keyed by dynamic 6-char pairing code (zero PII)
+      // Ephemeral WebRTC signaling rooms keyed by 6-char pairing code (zero PII)
       allow get: if isRoomCode(roomCode);
       allow list: if false;
 
@@ -285,6 +339,50 @@ service cloud.firestore {
         );
 
       allow delete: if false;
+
+      match /viewers/{viewerId} {
+        // Master Gate: parent room must exist; exact viewerId only; no listing
+        allow get: if isRoomCode(roomCode)
+          && isObsViewerId(viewerId)
+          && exists(/databases/$(database)/documents/webrtc_rooms/$(roomCode));
+        allow list: if false;
+
+        allow create: if isRoomCode(roomCode)
+          && isObsViewerId(viewerId)
+          && isValidVcamViewer(incoming(), roomCode, viewerId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/webrtc_rooms/$(roomCode));
+
+        allow update: if isRoomCode(roomCode)
+          && isObsViewerId(viewerId)
+          && isValidVcamViewer(incoming(), roomCode, viewerId)
+          && incoming().viewerId == existing().viewerId
+          && incoming().roomCode == existing().roomCode
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/webrtc_rooms/$(roomCode))
+          && (
+            // Action: PC Receiver publishes loopback WebRTC offer & ICE candidates
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'offerId',
+              'offerSdp',
+              'pcIceCandidates',
+              'updatedAt'
+            ])
+            ||
+            // Action: OBS Studio Browser Source requests stream or publishes WebRTC answer & ICE
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'requestNonce',
+              'answerForOfferId',
+              'answerSdp',
+              'viewerIceCandidates',
+              'updatedAt'
+            ])
+          );
+
+        allow delete: if false;
+      }
     }
 
     match /admins/{adminId} {

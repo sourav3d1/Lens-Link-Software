@@ -37,6 +37,7 @@ import {
   getCameraStreamSafe,
   getRtcConfiguration,
   getWsUrl,
+  preferHardwareVideoCodec,
   triggerTapAutoFocus,
   tuneVideoSender,
 } from '../../lib/webrtc';
@@ -55,16 +56,43 @@ function getPhoneDeviceLabel(): string {
   return 'Smartphone Camera';
 }
 
+const LAST_PAIR_CODE_KEY = 'lenslink_last_pair_code';
+
+function getSavedPairCode(): string {
+  try {
+    const raw = (localStorage.getItem(LAST_PAIR_CODE_KEY) || '').trim().toUpperCase();
+    return /^[A-Z0-9]{6}$/.test(raw) ? raw : '';
+  } catch {
+    return '';
+  }
+}
+
+function saveLastPairCode(code: string): void {
+  const clean = code.trim().toUpperCase();
+  if (!/^[A-Z0-9]{6}$/.test(clean)) return;
+  try {
+    localStorage.setItem(LAST_PAIR_CODE_KEY, clean);
+  } catch {
+    // Ignore storage error
+  }
+}
+
 interface PhoneCameraViewProps {
   initialPairCode?: string;
   onSwitchToPc?: () => void;
 }
 
 export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCameraViewProps) {
-  const [pairCodeInput, setPairCodeInput] = useState(initialPairCode.toUpperCase());
-  const [activeCode, setActiveCode] = useState<string>(
-    /^[A-Z0-9]{6}$/i.test(initialPairCode) ? initialPairCode.toUpperCase() : ''
-  );
+  const cleanInitial = /^[A-Z0-9]{6}$/i.test(initialPairCode) ? initialPairCode.toUpperCase() : '';
+  const [savedPairCode, setSavedPairCode] = useState<string>(() => {
+    if (cleanInitial) {
+      saveLastPairCode(cleanInitial);
+      return cleanInitial;
+    }
+    return getSavedPairCode();
+  });
+  const [pairCodeInput, setPairCodeInput] = useState<string>(cleanInitial || getSavedPairCode());
+  const [activeCode, setActiveCode] = useState<string>(cleanInitial);
   const [scannerOpen, setScannerOpen] = useState(false);
   const [controlsOpen, setControlsOpen] = useState(false);
 
@@ -258,6 +286,7 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
     const videoTrack = stream.getVideoTracks()[0];
     if (videoTrack) {
       const sender = rtc.addTrack(videoTrack, stream);
+      preferHardwareVideoCodec(rtc);
       await tuneVideoSender(sender, settingsRef.current);
     }
 
@@ -274,7 +303,7 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
             phoneIceCandidates: [...phoneIceListRef.current],
           });
         }
-      }, 120);
+      }, 50);
     };
 
     rtc.onicecandidate = (event) => {
@@ -845,20 +874,30 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
     [createAndSendOffer, requestWakeLock, sendWs]
   );
 
+  const connectAndStreamCode = useCallback(
+    async (rawCode: string) => {
+      const cleaned = rawCode.trim().toUpperCase();
+      if (!/^[A-Z0-9]{6}$/.test(cleaned)) {
+        setErrorMsg('Enter the 6-character pairing code shown on your PC.');
+        return;
+      }
+      setErrorMsg(null);
+      saveLastPairCode(cleaned);
+      setSavedPairCode(cleaned);
+      setPairCodeInput(cleaned);
+      setActiveCode(cleaned);
+      activeCodeRef.current = cleaned;
+      const stream = await startLocalCamera(settingsRef.current);
+      if (stream) {
+        await startStreamingNow(cleaned);
+      }
+    },
+    [startLocalCamera, startStreamingNow]
+  );
+
   const handleJoinSubmit = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    const cleaned = pairCodeInput.trim().toUpperCase();
-    if (!/^[A-Z0-9]{6}$/.test(cleaned)) {
-      setErrorMsg('Enter the 6-character pairing code shown on your PC.');
-      return;
-    }
-    setErrorMsg(null);
-    setActiveCode(cleaned);
-    activeCodeRef.current = cleaned;
-    const stream = await startLocalCamera(settings);
-    if (stream) {
-      await startStreamingNow(cleaned);
-    }
+    await connectAndStreamCode(pairCodeInput);
   };
 
   const handleToggleStream = async () => {
@@ -1209,6 +1248,8 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
   const handleQrDetected = useCallback(
     (code: string) => {
       setScannerOpen(false);
+      saveLastPairCode(code);
+      setSavedPairCode(code);
       setPairCodeInput(code);
       setActiveCode(code);
       activeCodeRef.current = code;
@@ -1258,25 +1299,49 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
 
             <div className="space-y-1.5">
               <h1 className="text-2xl font-bold tracking-tight text-balance">
-                Connect your phone camera
+                {savedPairCode ? 'Ready to stream to your PC' : 'Connect your phone camera'}
               </h1>
               <p className="text-sm text-slate-400 leading-relaxed">
-                Scan the QR code on your PC or enter the 6-character pairing code to start streaming.
+                {savedPairCode
+                  ? 'Tap Connect & Play below to start streaming immediately — just like Iriun Webcam.'
+                  : 'Scan your PC QR code once. LensLink remembers your PC code for instant 1-tap streaming next time.'}
               </p>
             </div>
 
-            <button
-              type="button"
-              onClick={() => setScannerOpen(true)}
-              className="w-full min-h-[52px] flex items-center justify-center gap-3 rounded-2xl bg-blue-600 hover:bg-blue-500 active:scale-[0.99] text-white font-semibold text-base transition-all shadow-lg shadow-blue-950/50"
-            >
-              <QrCode className="w-5 h-5" />
-              <span>Scan PC QR Code</span>
-            </button>
+            {savedPairCode ? (
+              <div className="space-y-3">
+                <button
+                  type="button"
+                  onClick={() => void connectAndStreamCode(savedPairCode)}
+                  className="w-full min-h-[56px] flex items-center justify-center gap-3 rounded-2xl bg-blue-600 hover:bg-blue-500 active:scale-[0.99] text-white font-semibold text-base transition-all shadow-lg shadow-blue-950/50"
+                >
+                  <Video className="w-5 h-5" />
+                  <span>Connect &amp; Play ({savedPairCode})</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setScannerOpen(true)}
+                  className="w-full min-h-[48px] flex items-center justify-center gap-2.5 rounded-2xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 font-semibold text-sm transition-colors"
+                >
+                  <QrCode className="w-4 h-4" />
+                  <span>Scan Different PC QR</span>
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setScannerOpen(true)}
+                className="w-full min-h-[52px] flex items-center justify-center gap-3 rounded-2xl bg-blue-600 hover:bg-blue-500 active:scale-[0.99] text-white font-semibold text-base transition-all shadow-lg shadow-blue-950/50"
+              >
+                <QrCode className="w-5 h-5" />
+                <span>Scan PC QR Code</span>
+              </button>
+            )}
 
             <div className="flex items-center gap-3 text-xs text-slate-500">
               <div className="h-px flex-1 bg-slate-800" />
-              <span>or enter code</span>
+              <span>or enter code manually</span>
               <div className="h-px flex-1 bg-slate-800" />
             </div>
 
@@ -1310,12 +1375,12 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
                 className="w-full min-h-[52px] flex items-center justify-center gap-2.5 rounded-2xl bg-slate-800 hover:bg-slate-700 disabled:opacity-45 disabled:pointer-events-none text-white font-semibold text-sm border border-slate-700 transition-colors"
               >
                 <Camera className="w-5 h-5" />
-                <span>Allow Camera &amp; Connect</span>
+                <span>Allow Camera &amp; Stream</span>
               </button>
             </form>
 
             <p className="text-xs text-slate-500 text-center">
-              Local Wi-Fi video only. No account or cloud servers used.
+              Hardware H.264 low-latency peer-to-peer video over Wi-Fi.
             </p>
           </div>
         </main>

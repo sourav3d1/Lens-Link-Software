@@ -32,7 +32,26 @@ if (isMobileAppRoute) {
   document.title = 'LensLink Cam — Wireless Phone Webcam';
 }
 
-registerSW({ immediate: true });
+const updateSW = registerSW({
+  immediate: true,
+  onNeedRefresh() {
+    void updateSW(true);
+  },
+  onRegisteredSW(_swUrl, registration) {
+    if (registration) {
+      void registration.update().catch(() => {});
+    }
+  },
+});
+
+if ('serviceWorker' in navigator) {
+  let reloading = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (reloading) return;
+    reloading = true;
+    window.location.reload();
+  });
+}
 
 createRoot(document.getElementById('root')!).render(
   <ErrorBoundary>

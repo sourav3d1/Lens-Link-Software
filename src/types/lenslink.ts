@@ -155,7 +155,7 @@ export interface StreamStats {
 
 export const DEFAULT_CAMERA_SETTINGS: CameraSettings = {
   facingMode: 'environment',
-  resolution: '1080p',
+  resolution: '720p',
   frameRate: 30,
   zoom: 1,
   digitalZoom: 1,

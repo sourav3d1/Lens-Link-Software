@@ -190,6 +190,69 @@
         "updatedAt"
       ]
     },
+    "VcamViewer": {
+      "title": "VcamViewer",
+      "description": "Ephemeral localhost loopback WebRTC signaling between PC Receiver and OBS Studio Browser Source.",
+      "type": "object",
+      "properties": {
+        "viewerId": {
+          "type": "string",
+          "enum": ["obs-primary"]
+        },
+        "roomCode": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 6,
+          "pattern": "^[A-Z0-9]{6}$"
+        },
+        "requestNonce": {
+          "type": "integer"
+        },
+        "offerId": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "offerSdp": {
+          "type": "string",
+          "maxLength": 25000
+        },
+        "answerForOfferId": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "answerSdp": {
+          "type": "string",
+          "maxLength": 25000
+        },
+        "pcIceCandidates": {
+          "type": "array"
+        },
+        "viewerIceCandidates": {
+          "type": "array"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "viewerId",
+        "roomCode",
+        "requestNonce",
+        "offerId",
+        "offerSdp",
+        "answerForOfferId",
+        "answerSdp",
+        "pcIceCandidates",
+        "viewerIceCandidates",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
     "AdminUser": {
       "title": "AdminUser",
       "description": "Verified administrator UID record.",
@@ -221,6 +284,10 @@
     "/webrtc_rooms/{roomCode}": {
       "schema": { "$ref": "#/entities/WebRtcRoom" },
       "description": "Ephemeral WebRTC signaling documents enabling zero-config mobile-to-PC streaming across local Wi-Fi and deployed URLs."
+    },
+    "/webrtc_rooms/{roomCode}/viewers/{viewerId}": {
+      "schema": { "$ref": "#/entities/VcamViewer" },
+      "description": "Loopback WebRTC signaling channel between the PC Receiver and OBS Studio Browser Source."
     },
     "/admins/{adminId}": {
       "schema": { "$ref": "#/entities/AdminUser" },
