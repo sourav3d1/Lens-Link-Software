@@ -33,7 +33,7 @@ export const BUNDLE_CATALOG: BundleCatalogEntry[] = [
     filename: 'lenslink-browser-webcam.zip',
     apiPath: '/api/browser-cam/bundle',
     staticPath: '/downloads/lenslink-browser-webcam.zip',
-    version: '1.0.0',
+    version: '1.1.0',
   },
   {
     bundleId: 'windows-vcam',
@@ -76,6 +76,7 @@ export interface FirebaseBundlePayload {
   bytes: Uint8Array;
   filename: string;
   sizeBytes: number;
+  version?: string;
 }
 
 function uint8ToBase64(bytes: Uint8Array): string {
@@ -164,6 +165,7 @@ export async function fetchBundleFromFirebase(
       bytes,
       filename: data.filename,
       sizeBytes: bytes.byteLength,
+      version: typeof data.version === 'string' ? data.version : undefined,
     };
   } catch (error) {
     if (error instanceof Error && error.message.toLowerCase().includes('permission')) {

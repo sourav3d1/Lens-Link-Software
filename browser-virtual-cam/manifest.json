@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "LensLink Virtual Webcam",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Use your wireless smartphone camera via LensLink directly in Google Meet, Zoom Web, Teams, and any browser app — without OBS Studio.",
   "permissions": ["storage"],
   "host_permissions": ["<all_urls>"],

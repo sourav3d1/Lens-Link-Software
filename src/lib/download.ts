@@ -59,12 +59,21 @@ export async function downloadBundle(
   const catalogEntry = bundleId ? getCatalogEntry(bundleId) : undefined;
 
   try {
-    // 1. Try Firebase Firestore bundle store first when available
+    let staleFirebaseFallback: { bytes: Uint8Array; filename: string } | null = null;
+
+    // 1. Try Firebase Firestore bundle store first when up-to-date
     if (bundleId && preferFirebase) {
       const fbPayload = await fetchBundleFromFirebase(bundleId);
       if (fbPayload && isValidZipBytes(fbPayload.bytes)) {
-        triggerZipSave(fbPayload.bytes, fbPayload.filename || filename);
-        return { ok: true, source: 'firebase' };
+        const versionMatches = !catalogEntry || fbPayload.version === catalogEntry.version;
+        if (versionMatches) {
+          triggerZipSave(fbPayload.bytes, fbPayload.filename || filename);
+          return { ok: true, source: 'firebase' };
+        }
+        staleFirebaseFallback = {
+          bytes: fbPayload.bytes,
+          filename: fbPayload.filename || filename,
+        };
       }
     }
 
@@ -83,7 +92,11 @@ export async function downloadBundle(
       return { ok: true, source: 'static' };
     }
 
-    // 4. Final fallback to Firebase if preferFirebase was false
+    // 4. Final fallback to Firebase (even if version differed or preferFirebase was false)
+    if (staleFirebaseFallback) {
+      triggerZipSave(staleFirebaseFallback.bytes, staleFirebaseFallback.filename);
+      return { ok: true, source: 'firebase' };
+    }
     if (bundleId && !preferFirebase) {
       const fbPayload = await fetchBundleFromFirebase(bundleId);
       if (fbPayload && isValidZipBytes(fbPayload.bytes)) {

@@ -17,6 +17,8 @@ import { FirebaseBundleSyncCard } from '../common/FirebaseBundleSyncCard';
 interface VirtualCamPanelProps {
   pairCode: string;
   vcamBridgeCount: number;
+  extConnected?: boolean;
+  extRelayActive?: boolean;
   vcamWebCount: number;
   vcamWebFrameCount: number;
   bridgeStreamEnabled: boolean;
@@ -29,6 +31,8 @@ interface VirtualCamPanelProps {
 export function VirtualCamPanel({
   pairCode,
   vcamBridgeCount,
+  extConnected = false,
+  extRelayActive = false,
   vcamWebCount,
   vcamWebFrameCount,
   bridgeStreamEnabled,
@@ -130,8 +134,22 @@ export function VirtualCamPanel({
                 Adds <span className="font-semibold text-slate-800">LensLink Wireless Camera</span> directly inside Chrome &amp; Microsoft Edge for Google Meet, Zoom Web, Teams Web, and BIS portals.
               </p>
             </div>
-            <span className="text-xs font-mono tabular-nums text-slate-500 whitespace-nowrap">
-              {vcamBridgeCount > 0 ? `${vcamBridgeCount} active` : 'Ready'}
+            <span
+              className={`text-xs font-mono tabular-nums whitespace-nowrap ${
+                extRelayActive
+                  ? 'text-emerald-700 font-semibold'
+                  : extConnected
+                    ? 'text-blue-700 font-semibold'
+                    : 'text-slate-500'
+              }`}
+            >
+              {extRelayActive
+                ? 'Streaming Direct'
+                : extConnected
+                  ? 'Extension Linked'
+                  : vcamBridgeCount > 0
+                    ? `${vcamBridgeCount} active`
+                    : 'Ready (v1.1)'}
             </span>
           </div>
 

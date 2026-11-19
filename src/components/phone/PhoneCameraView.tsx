@@ -37,12 +37,23 @@ import {
   getCameraStreamSafe,
   getRtcConfiguration,
   getWsUrl,
-  isLocalLanHostname,
   triggerTapAutoFocus,
   tuneVideoSender,
 } from '../../lib/webrtc';
+import {
+  decodeIceCandidate,
+  encodeIceCandidate,
+  subscribeToRoom,
+  updatePhoneRoomFields,
+} from '../../lib/firestoreSignaling';
 import { QrScannerModal } from '../common/QrScannerModal';
 import { MobilePWAInstallButton } from '../common/PWAInstallButton';
+
+function getPhoneDeviceLabel(): string {
+  if (/iPhone|iPad/i.test(navigator.userAgent)) return 'iPhone Safari';
+  if (/Android/i.test(navigator.userAgent)) return 'Android Chrome';
+  return 'Smartphone Camera';
+}
 
 interface PhoneCameraViewProps {
   initialPairCode?: string;
@@ -83,11 +94,23 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
   const brightnessTrackRef = useRef<HTMLDivElement | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const wsOpenRef = useRef<boolean>(false);
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const pendingIceRef = useRef<RTCIceCandidateInit[]>([]);
   const reconnectTimerRef = useRef<number | null>(null);
   const isMountedRef = useRef(true);
   const isStreamingRef = useRef(false);
+  const activeCodeRef = useRef<string>(activeCode);
+  const pcOnlineRef = useRef<boolean>(pcOnline);
+  const firestoreRoomReadyRef = useRef<boolean>(false);
+  const currentOfferIdRef = useRef<string>('');
+  const appliedAnswerForOfferIdRef = useRef<string>('');
+  const phoneIceListRef = useRef<string[]>([]);
+  const phoneIceFlushTimerRef = useRef<number | null>(null);
+  const processedPcIceRef = useRef<Set<string>>(new Set());
+  const lastRestartNonceRef = useRef<number>(-1);
+  const lastFocusNonceRef = useRef<number>(-1);
+  const lastSyncedSettingsJsonRef = useRef<string>('');
   const settingsRef = useRef<CameraSettings>(DEFAULT_CAMERA_SETTINGS);
   const capabilitiesRef = useRef<CameraCapabilities>({ devices: [] });
   const wakeLockRef = useRef<{ release: () => Promise<void> } | null>(null);
@@ -126,6 +149,8 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
   settingsRef.current = settings;
   capabilitiesRef.current = capabilities;
   isStreamingRef.current = isStreaming;
+  activeCodeRef.current = activeCode;
+  pcOnlineRef.current = pcOnline;
 
   const attachStreamToVideo = useCallback((el: HTMLVideoElement | null, stream: MediaStream | null) => {
     if (!el || !stream) return;
@@ -164,9 +189,15 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
   }, []);
 
   const closePeerConnection = useCallback(() => {
+    if (phoneIceFlushTimerRef.current) {
+      clearTimeout(phoneIceFlushTimerRef.current);
+      phoneIceFlushTimerRef.current = null;
+    }
+    phoneIceListRef.current = [];
     if (pcRef.current) {
       pcRef.current.onicecandidate = null;
       pcRef.current.onconnectionstatechange = null;
+      pcRef.current.oniceconnectionstatechange = null;
       pcRef.current.close();
       pcRef.current = null;
     }
@@ -206,16 +237,22 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
 
   const createAndSendOffer = useCallback(async () => {
     const stream = localStreamRef.current;
-    const ws = wsRef.current;
-    if (!stream || !ws || ws.readyState !== WebSocket.OPEN || !isStreamingRef.current) {
+    const code = activeCodeRef.current;
+    const canSignal = wsOpenRef.current || firestoreRoomReadyRef.current;
+    if (!stream || !code || !isStreamingRef.current || !canSignal) {
       return;
     }
 
     closePeerConnection();
     setConnectionStatus('connecting');
 
-    const localOnly = isLocalLanHostname();
-    const rtc = new RTCPeerConnection(getRtcConfiguration(localOnly));
+    const offerId = `off-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+    currentOfferIdRef.current = offerId;
+    appliedAnswerForOfferIdRef.current = '';
+    processedPcIceRef.current.clear();
+
+    // Always enable STUN + local LAN host candidates so same-Wi-Fi routers work even when mDNS fails
+    const rtc = new RTCPeerConnection(getRtcConfiguration(false));
     pcRef.current = rtc;
 
     const videoTrack = stream.getVideoTracks()[0];
@@ -224,45 +261,89 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
       await tuneVideoSender(sender, settingsRef.current);
     }
 
+    const schedulePhoneIceFlush = () => {
+      if (phoneIceFlushTimerRef.current) return;
+      phoneIceFlushTimerRef.current = window.setTimeout(() => {
+        phoneIceFlushTimerRef.current = null;
+        if (
+          activeCodeRef.current &&
+          currentOfferIdRef.current === offerId &&
+          phoneIceListRef.current.length > 0
+        ) {
+          void updatePhoneRoomFields(activeCodeRef.current, {
+            phoneIceCandidates: [...phoneIceListRef.current],
+          });
+        }
+      }, 120);
+    };
+
     rtc.onicecandidate = (event) => {
       if (event.candidate) {
+        const candJson = event.candidate.toJSON();
         sendWs({
           type: 'rtc:ice-candidate',
           target: 'pc',
-          candidate: event.candidate.toJSON(),
+          candidate: candJson,
         });
-      }
-    };
-
-    rtc.onconnectionstatechange = () => {
-      const state = rtc.connectionState;
-      if (state === 'connected') {
-        setConnectionStatus('connected');
-        setErrorMsg(null);
-      } else if (state === 'connecting') {
-        setConnectionStatus('connecting');
-      } else if (state === 'disconnected') {
-        setConnectionStatus('reconnecting');
-      } else if (state === 'failed') {
-        setConnectionStatus('reconnecting');
-        if (isStreamingRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
-          window.setTimeout(() => {
-            if (isMountedRef.current && isStreamingRef.current) {
-              void createAndSendOffer();
-            }
-          }, 1200);
+        const encoded = encodeIceCandidate(candJson);
+        if (
+          encoded &&
+          !phoneIceListRef.current.includes(encoded) &&
+          phoneIceListRef.current.length < 24
+        ) {
+          phoneIceListRef.current.push(encoded);
+          schedulePhoneIceFlush();
         }
       }
     };
 
+    const syncConnState = () => {
+      const state = rtc.connectionState;
+      const iceState = rtc.iceConnectionState;
+      if (state === 'connected' || iceState === 'connected' || iceState === 'completed') {
+        setConnectionStatus('connected');
+        setErrorMsg(null);
+      } else if (state === 'connecting' || iceState === 'checking') {
+        setConnectionStatus('connecting');
+      } else if (state === 'disconnected' || iceState === 'disconnected') {
+        setConnectionStatus('reconnecting');
+      } else if (state === 'failed' || iceState === 'failed') {
+        setConnectionStatus('reconnecting');
+        if (isStreamingRef.current && (wsOpenRef.current || firestoreRoomReadyRef.current)) {
+          window.setTimeout(() => {
+            if (isMountedRef.current && isStreamingRef.current && pcRef.current === rtc) {
+              void createAndSendOffer();
+            }
+          }, 1500);
+        }
+      }
+    };
+
+    rtc.onconnectionstatechange = syncConnState;
+    rtc.oniceconnectionstatechange = syncConnState;
+
     try {
       const offer = await rtc.createOffer();
       await rtc.setLocalDescription(offer);
-      sendWs({
-        type: 'rtc:offer',
-        target: 'pc',
-        sdp: rtc.localDescription?.toJSON(),
-      });
+      const localDesc = rtc.localDescription;
+      if (localDesc) {
+        sendWs({
+          type: 'rtc:offer',
+          target: 'pc',
+          sessionToken: offerId,
+          sdp: localDesc.toJSON(),
+        });
+        if (firestoreRoomReadyRef.current) {
+          await updatePhoneRoomFields(code, {
+            phoneOnline: true,
+            phoneName: getPhoneDeviceLabel(),
+            phoneStreaming: true,
+            offerId,
+            offerSdp: localDesc.sdp || '',
+            phoneIceCandidates: [...phoneIceListRef.current],
+          });
+        }
+      }
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Failed to negotiate WebRTC connection.');
     }
@@ -299,15 +380,19 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
             settingsRef.current = updated;
           }
 
+          const deviceLabel = getPhoneDeviceLabel();
           sendWs({
             type: 'camera:capabilities',
             capabilities: caps,
-            phoneName: navigator.userAgent.includes('iPhone')
-              ? 'iPhone Camera'
-              : navigator.userAgent.includes('Android')
-                ? 'Android Camera'
-                : 'Mobile Browser Camera',
+            phoneName: deviceLabel,
           });
+          if (activeCodeRef.current && firestoreRoomReadyRef.current) {
+            void updatePhoneRoomFields(activeCodeRef.current, {
+              capabilities: caps,
+              phoneName: deviceLabel,
+              phoneOnline: true,
+            });
+          }
 
           if (pcRef.current && isStreamingRef.current) {
             const sender = pcRef.current.getSenders().find((s) => s.track?.kind === 'video');
@@ -369,31 +454,192 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
     [sendWs]
   );
 
-  // Signaling WebSocket with automatic reconnection
+  // Firestore real-time WebRTC signaling (works seamlessly on static & same-Wi-Fi deployments)
+  useEffect(() => {
+    isMountedRef.current = true;
+    if (!activeCode) return;
+
+    let active = true;
+    let announcedPresence = false;
+    firestoreRoomReadyRef.current = false;
+    lastRestartNonceRef.current = -1;
+    lastFocusNonceRef.current = -1;
+    processedPcIceRef.current.clear();
+
+    const unsub = subscribeToRoom(activeCode, async (room) => {
+      if (!active || !isMountedRef.current) return;
+
+      if (!room) {
+        firestoreRoomReadyRef.current = false;
+        if (!wsOpenRef.current) {
+          setPcOnline(false);
+          pcOnlineRef.current = false;
+          setConnectionStatus('waiting');
+        }
+        return;
+      }
+
+      firestoreRoomReadyRef.current = true;
+      const online = Boolean(room.pcOnline);
+      setPcOnline(online);
+      pcOnlineRef.current = online;
+      if (room.pcName) setPcName(room.pcName);
+
+      if (!announcedPresence) {
+        announcedPresence = true;
+        const fields: Parameters<typeof updatePhoneRoomFields>[1] = {
+          phoneOnline: true,
+          phoneName: getPhoneDeviceLabel(),
+          phoneStreaming: isStreamingRef.current,
+        };
+        if (capabilitiesRef.current.devices.length > 0) {
+          fields.capabilities = capabilitiesRef.current;
+        }
+        void updatePhoneRoomFields(activeCode, fields);
+      }
+
+      // Apply remote PC settings updates without echoing back
+      if (room.settings && typeof room.settings === 'object' && Object.keys(room.settings).length > 0) {
+        const incomingJson = JSON.stringify(room.settings);
+        if (incomingJson !== lastSyncedSettingsJsonRef.current) {
+          lastSyncedSettingsJsonRef.current = incomingJson;
+          const prev = settingsRef.current;
+          const incoming = room.settings;
+          const merged: CameraSettings = { ...prev, ...incoming };
+          setSettings(merged);
+          settingsRef.current = merged;
+
+          const needsTrackReopen =
+            (incoming.facingMode && incoming.facingMode !== prev.facingMode) ||
+            (incoming.deviceId !== undefined && incoming.deviceId !== prev.deviceId) ||
+            (incoming.resolution && incoming.resolution !== prev.resolution) ||
+            (incoming.frameRate && incoming.frameRate !== prev.frameRate);
+
+          if (needsTrackReopen && localStreamRef.current) {
+            await startLocalCamera(merged);
+          } else if (localStreamRef.current) {
+            const track = localStreamRef.current.getVideoTracks()[0];
+            await applyHardwareConstraints(track, incoming);
+          }
+        }
+      }
+
+      // Remote tap-to-focus from PC
+      const focusNonce = typeof room.focusNonce === 'number' ? room.focusNonce : 0;
+      if (lastFocusNonceRef.current === -1) {
+        lastFocusNonceRef.current = focusNonce;
+      } else if (focusNonce > lastFocusNonceRef.current) {
+        lastFocusNonceRef.current = focusNonce;
+        const track = localStreamRef.current?.getVideoTracks()[0];
+        void triggerTapAutoFocus(track, {
+          x: typeof room.focusX === 'number' ? room.focusX : 0.5,
+          y: typeof room.focusY === 'number' ? room.focusY : 0.5,
+        });
+      }
+
+      // Remote restart request from PC
+      const restartNonce = typeof room.restartNonce === 'number' ? room.restartNonce : 0;
+      if (lastRestartNonceRef.current === -1) {
+        lastRestartNonceRef.current = restartNonce;
+      } else if (restartNonce > lastRestartNonceRef.current) {
+        lastRestartNonceRef.current = restartNonce;
+        if (isStreamingRef.current && localStreamRef.current) {
+          await createAndSendOffer();
+        }
+        return;
+      }
+
+      // Start WebRTC offer automatically once PC is online and phone camera is streaming
+      if (online && isStreamingRef.current && localStreamRef.current) {
+        const rtcState = pcRef.current?.connectionState;
+        if (!pcRef.current || rtcState === 'closed' || rtcState === 'failed') {
+          await createAndSendOffer();
+          return;
+        }
+      } else if (!online && !wsOpenRef.current) {
+        setConnectionStatus('waiting');
+        closePeerConnection();
+        return;
+      }
+
+      // Apply WebRTC Answer from PC
+      if (
+        room.answerForOfferId &&
+        room.answerForOfferId === currentOfferIdRef.current &&
+        room.answerSdp &&
+        appliedAnswerForOfferIdRef.current !== room.answerForOfferId &&
+        pcRef.current
+      ) {
+        appliedAnswerForOfferIdRef.current = room.answerForOfferId;
+        try {
+          await pcRef.current.setRemoteDescription(
+            new RTCSessionDescription({ type: 'answer', sdp: room.answerSdp })
+          );
+          for (const cand of pendingIceRef.current) {
+            await pcRef.current.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
+          }
+          pendingIceRef.current = [];
+        } catch {
+          // Ignore stale answer
+        }
+      }
+
+      // Apply trickle ICE candidates from PC
+      if (
+        Array.isArray(room.pcIceCandidates) &&
+        room.answerForOfferId === currentOfferIdRef.current
+      ) {
+        for (const encoded of room.pcIceCandidates) {
+          if (processedPcIceRef.current.has(encoded)) continue;
+          processedPcIceRef.current.add(encoded);
+          const decoded = decodeIceCandidate(encoded);
+          if (!decoded) continue;
+          if (pcRef.current && pcRef.current.remoteDescription) {
+            await pcRef.current.addIceCandidate(new RTCIceCandidate(decoded)).catch(() => {});
+          } else {
+            pendingIceRef.current.push(decoded);
+          }
+        }
+      }
+    });
+
+    return () => {
+      active = false;
+      firestoreRoomReadyRef.current = false;
+      unsub();
+      void updatePhoneRoomFields(activeCode, {
+        phoneOnline: false,
+        phoneStreaming: false,
+      });
+    };
+  }, [activeCode, closePeerConnection, createAndSendOffer, startLocalCamera]);
+
+  // Optional local Express WebSocket signaling (auto-backs off silently if /ws is not hosted)
   useEffect(() => {
     isMountedRef.current = true;
     if (!activeCode) return;
 
     let attempt = 0;
     let manualClose = false;
+    let openedOnce = false;
 
     const connectSocket = () => {
       if (!isMountedRef.current || manualClose) return;
-      setConnectionStatus(attempt > 0 ? 'reconnecting' : 'connecting');
+      if (openedOnce && !firestoreRoomReadyRef.current) {
+        setConnectionStatus(attempt > 0 ? 'reconnecting' : 'connecting');
+      }
 
       const ws = new WebSocket(getWsUrl());
       wsRef.current = ws;
 
       ws.onopen = () => {
         if (!isMountedRef.current) return;
+        openedOnce = true;
+        wsOpenRef.current = true;
         attempt = 0;
         setReconnectAttempt(0);
         setErrorMsg(null);
-        const deviceLabel = /iPhone|iPad/i.test(navigator.userAgent)
-          ? 'iPhone Safari'
-          : /Android/i.test(navigator.userAgent)
-            ? 'Android Chrome'
-            : 'Smartphone Camera';
+        const deviceLabel = getPhoneDeviceLabel();
 
         sendWs({
           type: 'room:join',
@@ -424,21 +670,26 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
         }
 
         if (msg.type === 'room:error') {
-          setErrorMsg(msg.message || 'Unable to join room.');
-          setConnectionStatus('disconnected');
+          if (!firestoreRoomReadyRef.current) {
+            setErrorMsg(msg.message || 'Unable to join room.');
+            setConnectionStatus('disconnected');
+          }
           return;
         }
 
         if (msg.type === 'room:status') {
           const online = Boolean(msg.pcOnline);
-          setPcOnline(online);
+          if (online) {
+            setPcOnline(true);
+            pcOnlineRef.current = true;
+          }
           if (msg.pcName) setPcName(msg.pcName);
-          if (online && isStreamingRef.current) {
+          if (online && isStreamingRef.current && localStreamRef.current) {
             const rtcState = pcRef.current?.connectionState;
             if (!pcRef.current || rtcState === 'closed' || rtcState === 'failed') {
               await createAndSendOffer();
             }
-          } else if (!online) {
+          } else if (!online && !firestoreRoomReadyRef.current) {
             setConnectionStatus('waiting');
             closePeerConnection();
           }
@@ -446,6 +697,10 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
         }
 
         if (msg.type === 'rtc:answer' && msg.sdp && pcRef.current) {
+          if (appliedAnswerForOfferIdRef.current === currentOfferIdRef.current) {
+            return;
+          }
+          appliedAnswerForOfferIdRef.current = currentOfferIdRef.current;
           try {
             await pcRef.current.setRemoteDescription(new RTCSessionDescription(msg.sdp));
             for (const cand of pendingIceRef.current) {
@@ -493,6 +748,7 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
           const incoming = msg.settings;
           const prev = settingsRef.current;
           const merged: CameraSettings = { ...prev, ...incoming };
+          lastSyncedSettingsJsonRef.current = JSON.stringify(merged);
           setSettings(merged);
           settingsRef.current = merged;
 
@@ -512,11 +768,19 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
       };
 
       ws.onclose = () => {
+        wsOpenRef.current = false;
         if (!isMountedRef.current || manualClose) return;
-        setPcOnline(false);
-        setConnectionStatus('reconnecting');
         attempt += 1;
-        setReconnectAttempt(attempt);
+        // If /ws never opened (e.g. static/shared deployment), silently rely on Firestore signaling
+        if (!openedOnce && attempt >= 2) {
+          return;
+        }
+        if (openedOnce && !firestoreRoomReadyRef.current) {
+          setPcOnline(false);
+          pcOnlineRef.current = false;
+          setConnectionStatus('reconnecting');
+          setReconnectAttempt(attempt);
+        }
         const delayMs = Math.min(8000, 1000 * Math.pow(1.6, attempt - 1));
         reconnectTimerRef.current = window.setTimeout(connectSocket, delayMs);
       };
@@ -525,7 +789,7 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
     connectSocket();
 
     const handleOnline = () => {
-      if (wsRef.current?.readyState !== WebSocket.OPEN) {
+      if (openedOnce && wsRef.current?.readyState !== WebSocket.OPEN) {
         if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
         connectSocket();
       }
@@ -534,6 +798,7 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
 
     return () => {
       manualClose = true;
+      wsOpenRef.current = false;
       window.removeEventListener('online', handleOnline);
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       if (wsRef.current) {
@@ -557,6 +822,29 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
     };
   }, [closePeerConnection, releaseWakeLock, stopCameraStream]);
 
+  const startStreamingNow = useCallback(
+    async (codeOverride?: string) => {
+      const code = codeOverride || activeCodeRef.current;
+      setIsStreaming(true);
+      isStreamingRef.current = true;
+      sendWs({ type: 'camera:stream-state', streaming: true });
+      if (code && firestoreRoomReadyRef.current) {
+        void updatePhoneRoomFields(code, {
+          phoneOnline: true,
+          phoneName: getPhoneDeviceLabel(),
+          phoneStreaming: true,
+        });
+      }
+      await requestWakeLock();
+      if (pcOnlineRef.current && (wsOpenRef.current || firestoreRoomReadyRef.current)) {
+        await createAndSendOffer();
+      } else {
+        setConnectionStatus('waiting');
+      }
+    },
+    [createAndSendOffer, requestWakeLock, sendWs]
+  );
+
   const handleJoinSubmit = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     const cleaned = pairCodeInput.trim().toUpperCase();
@@ -566,7 +854,11 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
     }
     setErrorMsg(null);
     setActiveCode(cleaned);
-    await startLocalCamera(settings);
+    activeCodeRef.current = cleaned;
+    const stream = await startLocalCamera(settings);
+    if (stream) {
+      await startStreamingNow(cleaned);
+    }
   };
 
   const handleToggleStream = async () => {
@@ -574,6 +866,9 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
       setIsStreaming(false);
       isStreamingRef.current = false;
       sendWs({ type: 'camera:stream-state', streaming: false });
+      if (activeCodeRef.current && firestoreRoomReadyRef.current) {
+        void updatePhoneRoomFields(activeCodeRef.current, { phoneStreaming: false });
+      }
       closePeerConnection();
       setConnectionStatus(pcOnline ? 'waiting' : 'disconnected');
       await releaseWakeLock();
@@ -586,24 +881,20 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
       if (!stream) return;
     }
 
-    setIsStreaming(true);
-    isStreamingRef.current = true;
-    sendWs({ type: 'camera:stream-state', streaming: true });
-    await requestWakeLock();
-    if (pcOnline) {
-      await createAndSendOffer();
-    } else {
-      setConnectionStatus('waiting');
-    }
+    await startStreamingNow();
   };
 
   const updateSetting = useCallback(
     async (patch: Partial<CameraSettings>) => {
       const prev = settingsRef.current;
       const next = { ...prev, ...patch };
+      lastSyncedSettingsJsonRef.current = JSON.stringify(next);
       setSettings(next);
       settingsRef.current = next;
       sendWs({ type: 'camera:settings', settings: patch });
+      if (activeCodeRef.current && firestoreRoomReadyRef.current) {
+        void updatePhoneRoomFields(activeCodeRef.current, { settings: next });
+      }
 
       const needsReopen =
         (patch.facingMode && patch.facingMode !== prev.facingMode) ||
@@ -920,11 +1211,15 @@ export function PhoneCameraView({ initialPairCode = '', onSwitchToPc }: PhoneCam
       setScannerOpen(false);
       setPairCodeInput(code);
       setActiveCode(code);
-      window.setTimeout(() => {
-        void startLocalCamera(settingsRef.current);
+      activeCodeRef.current = code;
+      window.setTimeout(async () => {
+        const stream = await startLocalCamera(settingsRef.current);
+        if (stream) {
+          await startStreamingNow(code);
+        }
       }, 350);
     },
-    [startLocalCamera]
+    [startLocalCamera, startStreamingNow]
   );
 
   const handleLeaveRoom = async () => {

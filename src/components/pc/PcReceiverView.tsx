@@ -36,8 +36,14 @@ import {
   collectInboundStats,
   getRtcConfiguration,
   getWsUrl,
-  isLocalLanHostname,
 } from '../../lib/webrtc';
+import {
+  createOrResetPcRoom,
+  decodeIceCandidate,
+  encodeIceCandidate,
+  subscribeToRoom,
+  updatePcRoomFields,
+} from '../../lib/firestoreSignaling';
 import { VirtualCamPanel } from '../vcam/VirtualCamPanel';
 import { QrCodeDisplay } from '../common/QrCodeDisplay';
 import { PWAInstallButton } from '../common/PWAInstallButton';
@@ -95,6 +101,8 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
   const [vcamWebFrameCount, setVcamWebFrameCount] = useState(0);
   const [vcamWebPeerIds, setVcamWebPeerIds] = useState<string[]>([]);
   const [bridgeStreamEnabled, setBridgeStreamEnabled] = useState(false);
+  const [extConnected, setExtConnected] = useState(false);
+  const [extRelayActive, setExtRelayActive] = useState(false);
 
   const [settings, setSettings] = useState<CameraSettings>(DEFAULT_CAMERA_SETTINGS);
   const [capabilities, setCapabilities] = useState<CameraCapabilities | null>(null);
@@ -108,7 +116,7 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
 
   const [copiedCode, setCopiedCode] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
-  const [localOnlyIce, setLocalOnlyIce] = useState<boolean>(() => isLocalLanHostname());
+  const [localOnlyIce, setLocalOnlyIce] = useState<boolean>(false);
   const [capturedPhotos, setCapturedPhotos] = useState<CapturedPhoto[]>([]);
   const [downloadingAndroid, setDownloadingAndroid] = useState(false);
   const [androidDownloadError, setAndroidDownloadError] = useState<string | null>(null);
@@ -117,6 +125,7 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
   const videoContainerRef = useRef<HTMLDivElement | null>(null);
   const remoteStreamRef = useRef<MediaStream | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const wsOpenRef = useRef<boolean>(false);
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const pendingIceRef = useRef<RTCIceCandidateInit[]>([]);
   const vcamPeersRef = useRef<Map<string, RTCPeerConnection>>(new Map());
@@ -128,6 +137,18 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
   const phoneOnlineRef = useRef<boolean>(phoneOnline);
   const localOnlyIceRef = useRef<boolean>(localOnlyIce);
   const settingsRef = useRef<CameraSettings>(settings);
+  const hasVideoTrackRef = useRef<boolean>(hasVideoTrack);
+  const phoneNameRef = useRef<string>(phoneName);
+  const extRelayActiveRef = useRef<boolean>(extRelayActive);
+
+  // Firestore signaling tracking refs
+  const lastHandledOfferIdRef = useRef<string>('');
+  const processedPhoneIceRef = useRef<Set<string>>(new Set());
+  const pcIceListRef = useRef<string[]>([]);
+  const pcIceFlushTimerRef = useRef<number | null>(null);
+  const restartNonceRef = useRef<number>(0);
+  const focusNonceRef = useRef<number>(0);
+  const lastSyncedSettingsJsonRef = useRef<string>('');
 
   pairCodeRef.current = pairCode;
   sessionTokenRef.current = sessionToken;
@@ -135,16 +156,21 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
   phoneOnlineRef.current = phoneOnline;
   localOnlyIceRef.current = localOnlyIce;
   settingsRef.current = settings;
+  hasVideoTrackRef.current = hasVideoTrack;
+  phoneNameRef.current = phoneName;
+  extRelayActiveRef.current = extRelayActive;
 
-  // Fetch local LAN IP info for QR code generation
+  // Fetch local LAN IP info for QR code generation (only override origin when on localhost)
   useEffect(() => {
     let active = true;
+    const isLocalhost =
+      window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
     fetch('/api/network-info')
-      .then((res) => res.json())
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error('not ok'))))
       .then((data: NetworkInfoResponse) => {
         if (!active) return;
         setNetworkInfo(data);
-        if (data.suggestedOrigin) {
+        if (isLocalhost && data.lanIps && data.lanIps.length > 0 && data.suggestedOrigin) {
           setSelectedOrigin(data.suggestedOrigin);
         }
       })
@@ -170,24 +196,166 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
     vcamPeersRef.current.clear();
   }, []);
 
-  const closePhonePeer = useCallback(() => {
-    if (pcRef.current) {
-      pcRef.current.ontrack = null;
-      pcRef.current.onicecandidate = null;
-      pcRef.current.onconnectionstatechange = null;
-      pcRef.current.close();
-      pcRef.current = null;
-    }
-    pendingIceRef.current = [];
-    remoteStreamRef.current = null;
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
-    }
-    setHasVideoTrack(false);
-    prevStatsRef.current = null;
-    setStats({ width: 0, height: 0, fps: 0, bitrateKbps: 0, rttMs: null });
-    closeVcamWebPeers();
-  }, [closeVcamWebPeers]);
+  const closePhonePeer = useCallback(
+    (clearPendingIce = true) => {
+      if (pcIceFlushTimerRef.current) {
+        clearTimeout(pcIceFlushTimerRef.current);
+        pcIceFlushTimerRef.current = null;
+      }
+      pcIceListRef.current = [];
+      if (pcRef.current) {
+        pcRef.current.ontrack = null;
+        pcRef.current.onicecandidate = null;
+        pcRef.current.onconnectionstatechange = null;
+        pcRef.current.oniceconnectionstatechange = null;
+        pcRef.current.close();
+        pcRef.current = null;
+      }
+      if (clearPendingIce) {
+        pendingIceRef.current = [];
+      }
+      remoteStreamRef.current = null;
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
+      }
+      setHasVideoTrack(false);
+      prevStatsRef.current = null;
+      setStats({ width: 0, height: 0, fps: 0, bitrateKbps: 0, rttMs: null });
+      closeVcamWebPeers();
+    },
+    [closeVcamWebPeers]
+  );
+
+  const requestPhoneRestart = useCallback(() => {
+    sendWs({ type: 'rtc:restart', target: 'phone' });
+    restartNonceRef.current += 1;
+    void updatePcRoomFields(pairCodeRef.current, {
+      restartNonce: restartNonceRef.current,
+    });
+  }, [sendWs]);
+
+  const handleIncomingOffer = useCallback(
+    async (
+      sdp: RTCSessionDescriptionInit,
+      offerId?: string,
+      initialPhoneIce?: RTCIceCandidateInit[]
+    ) => {
+      const effectiveOfferId = offerId || `ws-${Date.now()}`;
+      if (offerId && lastHandledOfferIdRef.current === offerId && pcRef.current) {
+        return;
+      }
+      lastHandledOfferIdRef.current = effectiveOfferId;
+
+      closePhonePeer(false);
+      setConnectionStatus('connecting');
+      setPhoneStreaming(true);
+
+      const rtc = new RTCPeerConnection(getRtcConfiguration(localOnlyIceRef.current));
+      pcRef.current = rtc;
+
+      const schedulePcIceFlush = () => {
+        if (pcIceFlushTimerRef.current) return;
+        pcIceFlushTimerRef.current = window.setTimeout(() => {
+          pcIceFlushTimerRef.current = null;
+          if (pcIceListRef.current.length > 0) {
+            void updatePcRoomFields(pairCodeRef.current, {
+              pcIceCandidates: [...pcIceListRef.current],
+            });
+          }
+        }, 120);
+      };
+
+      rtc.ontrack = (trackEvent) => {
+        const stream =
+          trackEvent.streams[0] ||
+          (trackEvent.track ? new MediaStream([trackEvent.track]) : null);
+        if (stream) {
+          remoteStreamRef.current = stream;
+          if (videoRef.current) {
+            videoRef.current.muted = true;
+            videoRef.current.playsInline = true;
+            videoRef.current.srcObject = stream;
+            void videoRef.current.play().catch(() => {});
+          }
+          setHasVideoTrack(true);
+          if (
+            rtc.connectionState === 'connected' ||
+            rtc.iceConnectionState === 'connected' ||
+            rtc.iceConnectionState === 'completed'
+          ) {
+            setConnectionStatus('connected');
+          }
+        }
+      };
+
+      rtc.onicecandidate = (iceEvent) => {
+        if (iceEvent.candidate) {
+          const candJson = iceEvent.candidate.toJSON();
+          sendWs({
+            type: 'rtc:ice-candidate',
+            target: 'phone',
+            candidate: candJson,
+          });
+          const encoded = encodeIceCandidate(candJson);
+          if (encoded && !pcIceListRef.current.includes(encoded) && pcIceListRef.current.length < 24) {
+            pcIceListRef.current.push(encoded);
+            schedulePcIceFlush();
+          }
+        }
+      };
+
+      const syncConnectionStatus = () => {
+        const connState = rtc.connectionState;
+        const iceState = rtc.iceConnectionState;
+        if (connState === 'connected' || iceState === 'connected' || iceState === 'completed') {
+          setConnectionStatus('connected');
+        } else if (connState === 'connecting' || iceState === 'checking') {
+          setConnectionStatus('connecting');
+        } else if (connState === 'disconnected' || iceState === 'disconnected') {
+          setConnectionStatus('reconnecting');
+        } else if (connState === 'failed' || iceState === 'failed') {
+          setConnectionStatus('reconnecting');
+          requestPhoneRestart();
+        }
+      };
+
+      rtc.onconnectionstatechange = syncConnectionStatus;
+      rtc.oniceconnectionstatechange = syncConnectionStatus;
+
+      try {
+        await rtc.setRemoteDescription(new RTCSessionDescription(sdp));
+        if (initialPhoneIce && initialPhoneIce.length > 0) {
+          for (const cand of initialPhoneIce) {
+            await rtc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
+          }
+        }
+        for (const cand of pendingIceRef.current) {
+          await rtc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
+        }
+        pendingIceRef.current = [];
+
+        const answer = await rtc.createAnswer();
+        await rtc.setLocalDescription(answer);
+
+        const localDesc = rtc.localDescription;
+        if (localDesc) {
+          sendWs({
+            type: 'rtc:answer',
+            target: 'phone',
+            sdp: localDesc.toJSON(),
+          });
+          await updatePcRoomFields(pairCodeRef.current, {
+            answerForOfferId: effectiveOfferId,
+            answerSdp: localDesc.sdp || '',
+            pcIceCandidates: [...pcIceListRef.current],
+          });
+        }
+      } catch {
+        setConnectionStatus('reconnecting');
+      }
+    },
+    [closePhonePeer, requestPhoneRestart, sendWs]
+  );
 
   // Forward live remote MediaStream to chromeless /vcam browser outputs via loopback WebRTC
   const connectVcamWebPeer = useCallback(
@@ -239,10 +407,126 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
     [sendWs]
   );
 
-  // Signaling WebSocket with auto-reconnect
+  // Ensure remote stream attaches & plays cleanly when video becomes visible
+  useEffect(() => {
+    if (hasVideoTrack && videoRef.current && remoteStreamRef.current) {
+      if (videoRef.current.srcObject !== remoteStreamRef.current) {
+        videoRef.current.srcObject = remoteStreamRef.current;
+      }
+      videoRef.current.muted = true;
+      videoRef.current.playsInline = true;
+      void videoRef.current.play().catch(() => {});
+    }
+  }, [hasVideoTrack]);
+
+  // Firestore real-time WebRTC signaling room (works even on static deployments where /ws is unavailable)
+  useEffect(() => {
+    if (!pairCode) return;
+    let active = true;
+    lastHandledOfferIdRef.current = '';
+    processedPhoneIceRef.current.clear();
+
+    void createOrResetPcRoom({
+      code: pairCode,
+      sessionToken: sessionTokenRef.current,
+      pcName: pcNameRef.current,
+    });
+
+    const unsub = subscribeToRoom(pairCode, (room) => {
+      if (!active || !room) return;
+
+      const isPhoneOnline = Boolean(room.phoneOnline);
+      setPhoneOnline(isPhoneOnline);
+      if (room.phoneName) setPhoneName(room.phoneName);
+
+      if (
+        room.capabilities &&
+        typeof room.capabilities === 'object' &&
+        Array.isArray((room.capabilities as CameraCapabilities).devices)
+      ) {
+        setCapabilities(room.capabilities as CameraCapabilities);
+      }
+
+      if (room.settings && typeof room.settings === 'object' && Object.keys(room.settings).length > 0) {
+        const incomingJson = JSON.stringify(room.settings);
+        if (incomingJson !== lastSyncedSettingsJsonRef.current) {
+          lastSyncedSettingsJsonRef.current = incomingJson;
+          setSettings((prev) => {
+            const merged = { ...prev, ...room.settings };
+            settingsRef.current = merged;
+            return merged;
+          });
+        }
+      }
+
+      if (typeof room.phoneStreaming === 'boolean') {
+        setPhoneStreaming(room.phoneStreaming);
+        if (!room.phoneStreaming && isPhoneOnline && !wsOpenRef.current) {
+          closePhonePeer();
+          setConnectionStatus('waiting');
+        }
+      }
+
+      if (!isPhoneOnline && !wsOpenRef.current) {
+        setPhoneStreaming(false);
+        setConnectionStatus('waiting');
+        closePhonePeer();
+        lastHandledOfferIdRef.current = '';
+        processedPhoneIceRef.current.clear();
+        return;
+      }
+
+      // New WebRTC offer from Smartphone via Firestore
+      if (
+        room.phoneStreaming &&
+        room.offerId &&
+        room.offerSdp &&
+        room.offerId !== lastHandledOfferIdRef.current
+      ) {
+        processedPhoneIceRef.current.clear();
+        const initialIce: RTCIceCandidateInit[] = [];
+        if (Array.isArray(room.phoneIceCandidates)) {
+          for (const encoded of room.phoneIceCandidates) {
+            processedPhoneIceRef.current.add(encoded);
+            const decoded = decodeIceCandidate(encoded);
+            if (decoded) initialIce.push(decoded);
+          }
+        }
+        void handleIncomingOffer({ type: 'offer', sdp: room.offerSdp }, room.offerId, initialIce);
+        return;
+      }
+
+      // Apply trickle ICE candidates from Smartphone
+      if (
+        Array.isArray(room.phoneIceCandidates) &&
+        room.offerId &&
+        room.offerId === lastHandledOfferIdRef.current
+      ) {
+        for (const encoded of room.phoneIceCandidates) {
+          if (processedPhoneIceRef.current.has(encoded)) continue;
+          processedPhoneIceRef.current.add(encoded);
+          const decoded = decodeIceCandidate(encoded);
+          if (!decoded) continue;
+          if (pcRef.current && pcRef.current.remoteDescription) {
+            void pcRef.current.addIceCandidate(new RTCIceCandidate(decoded)).catch(() => {});
+          } else {
+            pendingIceRef.current.push(decoded);
+          }
+        }
+      }
+    });
+
+    return () => {
+      active = false;
+      unsub();
+    };
+  }, [pairCode, closePhonePeer, handleIncomingOffer]);
+
+  // Optional local Express WebSocket signaling (auto-backs off silently if /ws is not hosted)
   useEffect(() => {
     let disposed = false;
     let attempt = 0;
+    let openedOnce = false;
 
     const connect = () => {
       if (disposed) return;
@@ -251,6 +535,8 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
 
       ws.onopen = () => {
         if (disposed) return;
+        openedOnce = true;
+        wsOpenRef.current = true;
         attempt = 0;
         const codeToUse = pairCodeRef.current || generateLocalPairingCode();
         sendWs({
@@ -279,7 +565,9 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
 
         if (msg.type === 'room:status') {
           const isPhoneOnline = Boolean(msg.phoneOnline);
-          setPhoneOnline(isPhoneOnline);
+          if (isPhoneOnline) {
+            setPhoneOnline(true);
+          }
           if (msg.phoneName) setPhoneName(msg.phoneName);
           if (msg.capabilities) setCapabilities(msg.capabilities);
           if (typeof msg.vcamBridgeCount === 'number') setVcamBridgeCount(msg.vcamBridgeCount);
@@ -287,19 +575,12 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
           if (typeof msg.vcamWebFrameCount === 'number') setVcamWebFrameCount(msg.vcamWebFrameCount);
           if (Array.isArray(msg.vcamWebPeerIds)) {
             setVcamWebPeerIds(msg.vcamWebPeerIds);
-            // Clean up any departed vcam-web peers
             for (const existingPeerId of Array.from(vcamPeersRef.current.keys())) {
               if (!msg.vcamWebPeerIds.includes(existingPeerId)) {
                 vcamPeersRef.current.get(existingPeerId)?.close();
                 vcamPeersRef.current.delete(existingPeerId);
               }
             }
-          }
-
-          if (!isPhoneOnline) {
-            setPhoneStreaming(false);
-            setConnectionStatus('waiting');
-            closePhonePeer();
           }
           return;
         }
@@ -349,70 +630,9 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
           return;
         }
 
-        // Handle WebRTC offer from Smartphone
+        // Handle WebRTC offer from Smartphone over WS
         if (msg.type === 'rtc:offer' && msg.sdp) {
-          closePhonePeer();
-          setConnectionStatus('connecting');
-          setPhoneStreaming(true);
-
-          const rtc = new RTCPeerConnection(getRtcConfiguration(localOnlyIceRef.current));
-          pcRef.current = rtc;
-
-          rtc.ontrack = (trackEvent) => {
-            const stream =
-              trackEvent.streams[0] ||
-              (trackEvent.track ? new MediaStream([trackEvent.track]) : null);
-            if (stream) {
-              remoteStreamRef.current = stream;
-              if (videoRef.current) {
-                videoRef.current.srcObject = stream;
-                void videoRef.current.play().catch(() => {});
-              }
-              setHasVideoTrack(true);
-              setConnectionStatus('connected');
-            }
-          };
-
-          rtc.onicecandidate = (iceEvent) => {
-            if (iceEvent.candidate) {
-              sendWs({
-                type: 'rtc:ice-candidate',
-                target: 'phone',
-                candidate: iceEvent.candidate.toJSON(),
-              });
-            }
-          };
-
-          rtc.onconnectionstatechange = () => {
-            const st = rtc.connectionState;
-            if (st === 'connected') {
-              setConnectionStatus('connected');
-            } else if (st === 'connecting') {
-              setConnectionStatus('connecting');
-            } else if (st === 'disconnected') {
-              setConnectionStatus('reconnecting');
-            } else if (st === 'failed') {
-              setConnectionStatus('reconnecting');
-              sendWs({ type: 'rtc:restart', target: 'phone' });
-            }
-          };
-
-          try {
-            await rtc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
-            for (const cand of pendingIceRef.current) {
-              await rtc.addIceCandidate(new RTCIceCandidate(cand));
-            }
-            pendingIceRef.current = [];
-            const answer = await rtc.createAnswer();
-            await rtc.setLocalDescription(answer);
-            sendWs({
-              type: 'rtc:answer',
-              target: 'phone',
-              sdp: rtc.localDescription?.toJSON(),
-            });
-          } catch {
-            setConnectionStatus('reconnecting');
-          }
+          await handleIncomingOffer(msg.sdp, msg.sessionToken);
           return;
         }
 
@@ -428,9 +648,16 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
       };
 
       ws.onclose = () => {
+        wsOpenRef.current = false;
         if (disposed) return;
-        setConnectionStatus('reconnecting');
         attempt += 1;
+        // If /ws never opened (e.g. static/shared deployment), silently rely on Firestore signaling
+        if (!openedOnce && attempt >= 2) {
+          return;
+        }
+        if (openedOnce && pcRef.current?.connectionState !== 'connected') {
+          setConnectionStatus('reconnecting');
+        }
         const delay = Math.min(8000, 1000 * Math.pow(1.6, attempt - 1));
         reconnectTimerRef.current = window.setTimeout(connect, delay);
       };
@@ -440,6 +667,7 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
 
     return () => {
       disposed = true;
+      wsOpenRef.current = false;
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       if (wsRef.current) {
         wsRef.current.close();
@@ -447,7 +675,7 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
       }
       closePhonePeer();
     };
-  }, [closePhonePeer, connectVcamWebPeer, sendWs]);
+  }, [closePhonePeer, connectVcamWebPeer, handleIncomingOffer, sendWs]);
 
   // Periodically collect real WebRTC stats while connected
   useEffect(() => {
@@ -475,10 +703,54 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
 
   // Auto-enable frame relay when Virtual Cam extension, DirectShow bridge, or fallback browser source connects
   useEffect(() => {
-    if ((vcamBridgeCount > 0 || vcamWebFrameCount > 0) && hasVideoTrack) {
+    if ((vcamBridgeCount > 0 || vcamWebFrameCount > 0 || extRelayActive) && hasVideoTrack) {
       setBridgeStreamEnabled(true);
     }
-  }, [vcamBridgeCount, vcamWebFrameCount, hasVideoTrack]);
+  }, [vcamBridgeCount, vcamWebFrameCount, extRelayActive, hasVideoTrack]);
+
+  // Direct zero-WebSocket bridge with LensLink Browser Virtual Webcam Extension
+  const publishPcStatusToExtension = useCallback(() => {
+    window.postMessage(
+      {
+        source: 'lenslink-pc-app',
+        type: 'pc-status',
+        pairCode: pairCodeRef.current,
+        pcOnline: true,
+        phoneOnline: phoneOnlineRef.current,
+        phoneName: phoneNameRef.current,
+        hasVideoTrack: hasVideoTrackRef.current,
+      },
+      '*'
+    );
+  }, []);
+
+  useEffect(() => {
+    publishPcStatusToExtension();
+  }, [pairCode, phoneOnline, phoneName, hasVideoTrack, publishPcStatusToExtension]);
+
+  useEffect(() => {
+    const handleExtMessage = (event: MessageEvent) => {
+      if (event.source !== window || !event.data || event.data.source !== 'lenslink-ext-iso') {
+        return;
+      }
+      if (event.data.type === 'ext-hello') {
+        setExtConnected(true);
+        publishPcStatusToExtension();
+      } else if (event.data.type === 'pc-relay-control') {
+        setExtConnected(true);
+        const active = Boolean(event.data.active);
+        setExtRelayActive(active);
+        if (active) {
+          setBridgeStreamEnabled(true);
+        }
+        publishPcStatusToExtension();
+      }
+    };
+    window.addEventListener('message', handleExtMessage);
+    return () => {
+      window.removeEventListener('message', handleExtMessage);
+    };
+  }, [publishPcStatusToExtension]);
 
   // Publish active PC session code for Browser Virtual Webcam extension auto-pairing
   useEffect(() => {
@@ -496,10 +768,13 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
     };
   }, [pairCode]);
 
-  // Stream JPEG frames via Web Worker timer (avoids Chrome background-tab throttling when OBS is focused)
+  // Stream JPEG frames via Web Worker timer (avoids Chrome background-tab throttling)
+  // Feeds BOTH direct Chrome Extension relay (no WebSocket!) AND optional local WS bridges
   useEffect(() => {
-    const hasFrameClients = vcamBridgeCount > 0 || vcamWebFrameCount > 0;
-    if (!bridgeStreamEnabled || !hasVideoTrack || !hasFrameClients) return;
+    const hasWsFrameClients = vcamBridgeCount > 0 || vcamWebFrameCount > 0;
+    const needsExtensionFrames = extRelayActive;
+    if (!hasVideoTrack) return;
+    if (!needsExtensionFrames && !(bridgeStreamEnabled && hasWsFrameClients)) return;
 
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
@@ -511,16 +786,17 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
 
     const pumpFrame = () => {
       const video = videoRef.current;
-      const ws = wsRef.current;
-      if (
-        busy ||
-        !video ||
-        !ws ||
-        ws.readyState !== WebSocket.OPEN ||
-        video.readyState < video.HAVE_CURRENT_DATA
-      ) {
+      if (busy || !video || video.readyState < video.HAVE_CURRENT_DATA) {
         return;
       }
+
+      const ws = wsRef.current;
+      const sendOverWs =
+        Boolean(ws && ws.readyState === WebSocket.OPEN) &&
+        bridgeStreamEnabled &&
+        hasWsFrameClients;
+      const sendToExt = extRelayActiveRef.current;
+      if (!sendOverWs && !sendToExt) return;
 
       const dims = RESOLUTION_DIMENSIONS[settings.resolution] || RESOLUTION_DIMENSIONS['720p'];
       const w = video.videoWidth || dims.width;
@@ -551,22 +827,42 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
       ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, w, h);
       ctx.restore();
 
-      canvas.toBlob(
-        (blob) => {
-          if (blob && ws.readyState === WebSocket.OPEN) {
-            void blob.arrayBuffer().then((buf) => {
-              if (ws.readyState === WebSocket.OPEN) {
-                ws.send(buf);
-              }
+      if (sendToExt) {
+        try {
+          const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+          window.postMessage(
+            {
+              source: 'lenslink-pc-app',
+              type: 'pc-frame',
+              dataUrl,
+            },
+            '*'
+          );
+        } catch {
+          // Ignore canvas export error
+        }
+      }
+
+      if (sendOverWs && ws) {
+        canvas.toBlob(
+          (blob) => {
+            if (blob && ws.readyState === WebSocket.OPEN) {
+              void blob.arrayBuffer().then((buf) => {
+                if (ws.readyState === WebSocket.OPEN) {
+                  ws.send(buf);
+                }
+                busy = false;
+              });
+            } else {
               busy = false;
-            });
-          } else {
-            busy = false;
-          }
-        },
-        'image/jpeg',
-        0.82
-      );
+            }
+          },
+          'image/jpeg',
+          0.82
+        );
+      } else {
+        busy = false;
+      }
     };
 
     let worker: Worker | null = null;
@@ -591,6 +887,7 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
     bridgeStreamEnabled,
     capabilities?.brightness,
     capabilities?.contrast,
+    extRelayActive,
     hasVideoTrack,
     settings,
     vcamBridgeCount,
@@ -642,11 +939,16 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
       sessionToken: sessionTokenRef.current,
       pcName: nextName,
     });
+    void updatePcRoomFields(pairCodeRef.current, { pcName: nextName });
   };
 
   const updateRemoteSetting = (patch: Partial<CameraSettings>) => {
-    setSettings((prev) => ({ ...prev, ...patch }));
+    const next = { ...settingsRef.current, ...patch };
+    lastSyncedSettingsJsonRef.current = JSON.stringify(next);
+    setSettings(next);
+    settingsRef.current = next;
     sendWs({ type: 'camera:settings', settings: patch });
+    void updatePcRoomFields(pairCodeRef.current, { settings: next });
   };
 
   const pairingUrl = pairCode
@@ -668,7 +970,7 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
   };
 
   const handleCaptureOnPc = async (category: CaptureCategory) => {
-    if (phoneOnline) {
+    if (wsOpenRef.current && phoneOnline) {
       sendWs({ type: 'camera:request-capture', captureCategory: category });
       return;
     }
@@ -863,20 +1165,34 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
                     playsInline
                     muted
                     autoPlay
+                    onLoadedMetadata={(e) => {
+                      void e.currentTarget.play().catch(() => {});
+                    }}
+                    onPlaying={() => {
+                      setConnectionStatus('connected');
+                    }}
                     onClick={(e) => {
                       if (!hasVideoTrack) return;
                       const rect = e.currentTarget.getBoundingClientRect();
                       const x = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
                       const y = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
                       sendWs({ type: 'camera:trigger-focus', focusPoint: { x, y } });
+                      focusNonceRef.current += 1;
+                      void updatePcRoomFields(pairCodeRef.current, {
+                        focusNonce: focusNonceRef.current,
+                        focusX: x,
+                        focusY: y,
+                      });
                     }}
                     style={{
                       transform: videoTransform || undefined,
                       filter: videoFilterCss,
                     }}
-                    className={`w-full h-full object-contain ${
-                      hasVideoTrack ? 'block cursor-crosshair' : 'hidden'
-                    }`}
+                    className={
+                      hasVideoTrack
+                        ? 'w-full h-full object-contain cursor-crosshair'
+                        : 'absolute inset-0 w-full h-full opacity-0 pointer-events-none'
+                    }
                   />
 
                   {/* Pairing / Waiting State */}
@@ -1182,7 +1498,7 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
                     {phoneOnline && (
                       <button
                         type="button"
-                        onClick={() => sendWs({ type: 'rtc:restart', target: 'phone' })}
+                        onClick={requestPhoneRestart}
                         className="text-xs font-medium text-blue-600 hover:text-blue-700 inline-flex items-center gap-1"
                         title="Renegotiate stream"
                       >
@@ -1332,6 +1648,12 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
                           onClick={() => {
                             updateRemoteSetting({ focusMode: 'continuous' });
                             sendWs({ type: 'camera:trigger-focus' });
+                            focusNonceRef.current += 1;
+                            void updatePcRoomFields(pairCodeRef.current, {
+                              focusNonce: focusNonceRef.current,
+                              focusX: 0.5,
+                              focusY: 0.5,
+                            });
                           }}
                           className={`px-2.5 py-1 rounded-md text-xs font-medium ${
                             settings.focusMode === 'continuous'
@@ -1497,6 +1819,8 @@ export function PcReceiverView({ onOpenPhoneMode }: PcReceiverViewProps) {
             <VirtualCamPanel
               pairCode={pairCode}
               vcamBridgeCount={vcamBridgeCount}
+              extConnected={extConnected}
+              extRelayActive={extRelayActive}
               vcamWebCount={vcamWebCount}
               vcamWebFrameCount={vcamWebFrameCount}
               bridgeStreamEnabled={bridgeStreamEnabled}

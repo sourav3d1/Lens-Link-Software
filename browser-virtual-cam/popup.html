@@ -73,30 +73,25 @@
         margin-bottom: 12px;
         line-height: 1.4;
       }
-      .field {
-        margin-bottom: 10px;
-      }
-      label {
-        display: block;
-        font-size: 11px;
-        font-weight: 600;
-        color: #94a3b8;
-        margin-bottom: 4px;
-      }
-      input[type='text'] {
-        width: 100%;
+      .info-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
         padding: 8px 10px;
         border-radius: 8px;
-        border: 1px solid #334155;
         background: #020617;
-        color: #f8fafc;
+        border: 1px solid #1e293b;
+        margin-bottom: 10px;
         font-size: 12px;
-        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
       }
-      .row {
-        display: flex;
-        gap: 8px;
-        align-items: center;
+      .info-label {
+        color: #94a3b8;
+      }
+      .info-code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-weight: 700;
+        letter-spacing: 0.14em;
+        color: #f8fafc;
       }
       .toggle-row {
         display: flex;
@@ -142,24 +137,21 @@
   <body>
     <div class="header">
       <div class="title">LensLink Virtual Webcam</div>
-      <div id="statusBadge" class="badge">Idle</div>
+      <div id="statusBadge" class="badge">Ready</div>
     </div>
 
     <div class="preview-box">
       <img id="previewImg" alt="Live camera preview" />
-      <div id="previewEmpty" class="preview-empty">Waiting for live smartphone preview...</div>
+      <div id="previewEmpty" class="preview-empty">Waiting for live smartphone stream...</div>
     </div>
 
-    <div id="statusText" class="status-line">Open LensLink PC Receiver tab to auto-pair.</div>
-
-    <div class="field">
-      <label for="pairCodeInput">Pairing Code (6 characters)</label>
-      <input id="pairCodeInput" type="text" maxlength="6" placeholder="e.g. A7K9M2" />
+    <div id="statusText" class="status-line">
+      Keep the LensLink PC Receiver tab open in this browser for instant direct streaming.
     </div>
 
-    <div class="field">
-      <label for="serverOriginInput">LensLink Server URL</label>
-      <input id="serverOriginInput" type="text" placeholder="https://..." />
+    <div class="info-row">
+      <span class="info-label">Linked PC Tab Code</span>
+      <span id="pairCodeDisplay" class="info-code">------</span>
     </div>
 
     <div class="toggle-row">
@@ -178,11 +170,11 @@
       <input id="defaultToggle" type="checkbox" />
     </div>
 
-    <button id="saveBtn" type="button">Save &amp; Reconnect</button>
+    <button id="refreshBtn" type="button">Refresh Direct Link</button>
 
     <div class="hint">
-      In Google Meet, Zoom Web, Microsoft Teams, or BIS portals, choose
-      <strong>LensLink Wireless Camera</strong> — no OBS Studio required.
+      Streams directly from your open LensLink PC Receiver tab — no WebSocket server or OBS Studio required. Pick
+      <strong>LensLink Wireless Camera</strong> in Google Meet, Zoom Web, Teams, or BIS portals.
     </div>
 
     <script src="popup.js"></script>
