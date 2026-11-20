@@ -15,7 +15,7 @@ service cloud.firestore {
 
     function isCanonicalBundleId(bundleId) {
       return isValidId(bundleId)
-        && bundleId.matches('^(browser-webcam|windows-vcam|pc-windows|android-studio)$');
+        && bundleId.matches('^(browser-webcam|windows-vcam|pc-windows|android-studio|ios-app)$');
     }
 
     function isRoomCode(code) {
@@ -80,7 +80,7 @@ service cloud.firestore {
         && data.bundleId is string
         && data.bundleId == bundleId
         && data.bundleId.size() <= 64
-        && data.bundleId.matches('^(browser-webcam|windows-vcam|pc-windows|android-studio)$')
+        && data.bundleId.matches('^(browser-webcam|windows-vcam|pc-windows|android-studio|ios-app)$')
         && data.filename is string
         && data.filename.size() >= 5
         && data.filename.size() <= 128

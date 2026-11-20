@@ -2,9 +2,9 @@ import {
   CameraCapabilities,
   CameraDeviceSummary,
   CameraSettings,
-  CaptureCategory,
-  CapturedPhoto,
-  RESOLUTION_DIMENSIONS,
+  PhoneTelemetry,
+  RESOLUTION_SPECS,
+  SignalQuality,
   StreamStats,
 } from '../types/lenslink';
 
@@ -47,10 +47,14 @@ export function getRtcConfiguration(localOnly: boolean): RTCConfiguration {
 }
 
 export function buildMediaConstraints(settings: CameraSettings): MediaStreamConstraints {
-  const dims = RESOLUTION_DIMENSIONS[settings.resolution] || RESOLUTION_DIMENSIONS['1080p'];
+  const spec = RESOLUTION_SPECS[settings.resolution] || RESOLUTION_SPECS['1080p'];
+  const isPortrait = settings.orientation === 'portrait';
+  const idealWidth = isPortrait ? spec.height : spec.width;
+  const idealHeight = isPortrait ? spec.width : spec.height;
+
   const videoConstraints: MediaTrackConstraints = {
-    width: { ideal: dims.width },
-    height: { ideal: dims.height },
+    width: { ideal: idealWidth },
+    height: { ideal: idealHeight },
     frameRate: { ideal: settings.frameRate, max: 60 },
   };
 
@@ -61,7 +65,13 @@ export function buildMediaConstraints(settings: CameraSettings): MediaStreamCons
   }
 
   return {
-    audio: false,
+    audio: settings.audioEnabled
+      ? {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        }
+      : false,
     video: videoConstraints,
   };
 }
@@ -71,7 +81,7 @@ export async function getCameraStreamSafe(
 ): Promise<MediaStream> {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     throw new Error(
-      'Camera API unavailable. Open LensLink over HTTPS or localhost on a modern mobile browser.'
+      'Camera API unavailable. Open LensLink over HTTPS or localhost on a modern smartphone browser.'
     );
   }
 
@@ -79,6 +89,7 @@ export async function getCameraStreamSafe(
     try {
       return await navigator.mediaDevices.getUserMedia(buildMediaConstraints(settings));
     } catch (err) {
+      // Fallback 1: retry video-only if mic permission failed or resolution was rejected
       const fallbackConstraints: MediaStreamConstraints = {
         audio: false,
         video: settings.deviceId
@@ -102,6 +113,23 @@ export async function getCameraStreamSafe(
       return await acquire();
     }
     throw err;
+  }
+}
+
+export async function acquireMicrophoneTrack(): Promise<MediaStreamTrack | null> {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return null;
+  try {
+    const audioStream = await navigator.mediaDevices.getUserMedia({
+      video: false,
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    });
+    return audioStream.getAudioTracks()[0] || null;
+  } catch {
+    return null;
   }
 }
 
@@ -143,7 +171,6 @@ function classifyCameraDevice(rawLabel: string, index: number): Omit<CameraDevic
   } else if (isBack && lower.includes('wide')) {
     shortLabel = 'Rear Main';
   } else if (isBack) {
-    // Distinguish Android camera2 0/2/etc.
     const camNumMatch = lower.match(/camera2?\s*(\d+)/i);
     if (camNumMatch) {
       const idx = Number(camNumMatch[1]);
@@ -158,6 +185,15 @@ function classifyCameraDevice(rawLabel: string, index: number): Omit<CameraDevic
   }
 
   return { label, shortLabel, facing };
+}
+
+function isRangeCap(val: unknown): val is { min: number; max: number; step?: number } {
+  return (
+    typeof val === 'object' &&
+    val !== null &&
+    typeof (val as { min?: unknown }).min === 'number' &&
+    typeof (val as { max?: unknown }).max === 'number'
+  );
 }
 
 export async function extractCameraCapabilities(
@@ -203,6 +239,14 @@ export async function extractCameraCapabilities(
       };
     }
 
+    if (isRangeCap(raw.iso)) {
+      capabilities.iso = {
+        min: raw.iso.min,
+        max: raw.iso.max,
+        step: raw.iso.step || 50,
+      };
+    }
+
     if (isRangeCap(raw.brightness)) {
       capabilities.brightness = {
         min: raw.brightness.min,
@@ -216,14 +260,6 @@ export async function extractCameraCapabilities(
         min: raw.contrast.min,
         max: raw.contrast.max,
         step: raw.contrast.step || 1,
-      };
-    }
-
-    if (isRangeCap(raw.sharpness)) {
-      capabilities.sharpness = {
-        min: raw.sharpness.min,
-        max: raw.sharpness.max,
-        step: raw.sharpness.step || 1,
       };
     }
 
@@ -269,15 +305,6 @@ export async function extractCameraCapabilities(
   }
 
   return capabilities;
-}
-
-function isRangeCap(val: unknown): val is { min: number; max: number; step?: number } {
-  return (
-    typeof val === 'object' &&
-    val !== null &&
-    typeof (val as { min?: unknown }).min === 'number' &&
-    typeof (val as { max?: unknown }).max === 'number'
-  );
 }
 
 function mapNormalizedToRange(
@@ -333,16 +360,16 @@ export async function applyHardwareConstraints(
     );
   }
 
+  if (typeof patch.iso === 'number' && isRangeCap(caps.iso)) {
+    advanced.iso = Math.min(caps.iso.max, Math.max(caps.iso.min, patch.iso));
+  }
+
   if (typeof patch.brightness === 'number' && isRangeCap(caps.brightness)) {
     advanced.brightness = mapNormalizedToRange(patch.brightness, -50, 50, caps.brightness);
   }
 
   if (typeof patch.contrast === 'number' && isRangeCap(caps.contrast)) {
     advanced.contrast = mapNormalizedToRange(patch.contrast, -50, 100, caps.contrast);
-  }
-
-  if (typeof patch.sharpness === 'number' && isRangeCap(caps.sharpness)) {
-    advanced.sharpness = mapNormalizedToRange(patch.sharpness, 0, 100, caps.sharpness);
   }
 
   if (patch.whiteBalanceMode && Array.isArray(caps.whiteBalanceMode)) {
@@ -416,7 +443,6 @@ export async function triggerTapAutoFocus(
       return true;
     }
   } catch {
-    // Graceful fallback when browser doesn't support pointsOfInterest
     if (focusModes.includes('continuous')) {
       try {
         await track.applyConstraints({
@@ -448,96 +474,7 @@ export function buildVideoFilterCss(
     filters.push(`contrast(${c.toFixed(2)})`);
   }
 
-  if (settings.grayscale) {
-    filters.push('grayscale(1)');
-  }
-
   return filters.length > 0 ? filters.join(' ') : undefined;
-}
-
-export async function captureProcessedPhoto(options: {
-  video: HTMLVideoElement;
-  track?: MediaStreamTrack | null;
-  settings: CameraSettings;
-  category: CaptureCategory;
-  lensLabel: string;
-  hardwareBrightnessActive: boolean;
-  hardwareContrastActive: boolean;
-}): Promise<CapturedPhoto | null> {
-  const {
-    video,
-    track,
-    settings,
-    category,
-    lensLabel,
-    hardwareBrightnessActive,
-    hardwareContrastActive,
-  } = options;
-
-  const digitalZoom = Math.max(1, settings.digitalZoom || 1);
-  const filterCss = buildVideoFilterCss(
-    settings,
-    hardwareBrightnessActive,
-    hardwareContrastActive
-  );
-
-  let sourceImage: CanvasImageSource = video;
-  let srcW = video.videoWidth || 1920;
-  let srcH = video.videoHeight || 1080;
-
-  // Use native full-sensor ImageCapture.takePhoto() when available on Android Chrome
-  const win = window as unknown as {
-    ImageCapture?: new (track: MediaStreamTrack) => { takePhoto: () => Promise<Blob> };
-  };
-  if (track && win.ImageCapture && digitalZoom === 1 && !filterCss && !settings.mirror) {
-    try {
-      const imageCapture = new win.ImageCapture(track);
-      const blob = await imageCapture.takePhoto();
-      const bitmap = await createImageBitmap(blob);
-      sourceImage = bitmap;
-      srcW = bitmap.width;
-      srcH = bitmap.height;
-    } catch {
-      // Fallback to live video frame capture
-    }
-  }
-
-  if (srcW === 0 || srcH === 0) return null;
-
-  const cropW = Math.round(srcW / digitalZoom);
-  const cropH = Math.round(srcH / digitalZoom);
-  const cropX = Math.round((srcW - cropW) / 2);
-  const cropY = Math.round((srcH - cropH) / 2);
-
-  const canvas = document.createElement('canvas');
-  canvas.width = srcW;
-  canvas.height = srcH;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return null;
-
-  ctx.save();
-  if (settings.mirror) {
-    ctx.translate(srcW, 0);
-    ctx.scale(-1, 1);
-  }
-  if (filterCss) {
-    ctx.filter = filterCss;
-  }
-  ctx.drawImage(sourceImage, cropX, cropY, cropW, cropH, 0, 0, srcW, srcH);
-  ctx.restore();
-
-  const dataUrl = canvas.toDataURL('image/jpeg', 0.94);
-
-  return {
-    id: `${category}-${Date.now()}`,
-    category,
-    dataUrl,
-    width: srcW,
-    height: srcH,
-    capturedAt: new Date().toISOString(),
-    lensLabel,
-    zoom: Number((settings.zoom * digitalZoom).toFixed(1)),
-  };
 }
 
 export function preferHardwareVideoCodec(pc: RTCPeerConnection): void {
@@ -598,7 +535,8 @@ export function applyLowLatencyReceiver(pc: RTCPeerConnection): void {
 
 export async function tuneVideoSender(
   sender: RTCRtpSender | undefined,
-  settings: CameraSettings
+  settings: CameraSettings,
+  bitrateScale: number = 1
 ): Promise<void> {
   if (!sender || typeof sender.getParameters !== 'function') return;
   try {
@@ -609,20 +547,15 @@ export async function tuneVideoSender(
     if (!params.encodings || params.encodings.length === 0) {
       params.encodings = [{}];
     }
-    const maxBitrate =
-      settings.resolution === '1080p'
-        ? 4_200_000
-        : settings.resolution === '720p'
-          ? 2_500_000
-          : 1_200_000;
-    params.encodings[0].maxBitrate = maxBitrate;
+    const spec = RESOLUTION_SPECS[settings.resolution] || RESOLUTION_SPECS['1080p'];
+    const clampedScale = Math.min(1, Math.max(0.4, bitrateScale));
+    params.encodings[0].maxBitrate = Math.round(spec.targetBitrateBps * clampedScale);
     params.encodings[0].maxFramerate = settings.frameRate;
     params.encodings[0].scaleResolutionDownBy = 1;
     const extEncoding = params.encodings[0] as RTCRtpEncodingParameters & {
       networkPriority?: 'very-low' | 'low' | 'medium' | 'high';
     };
     extEncoding.networkPriority = 'high';
-    // Prioritize smooth, lag-free framerate over heavy frames when Wi-Fi fluctuates
     params.degradationPreference = 'maintain-framerate';
     await sender.setParameters(params);
   } catch {
@@ -630,15 +563,31 @@ export async function tuneVideoSender(
   }
 }
 
+export function computeSignalQuality(rttMs: number | null, packetLossPct: number): SignalQuality {
+  if (packetLossPct > 6 || (rttMs !== null && rttMs > 180)) return 'Weak';
+  if (packetLossPct > 2.5 || (rttMs !== null && rttMs > 90)) return 'Fair';
+  if (packetLossPct > 0.8 || (rttMs !== null && rttMs > 40)) return 'Good';
+  return 'Excellent';
+}
+
+export interface StatsSnapshot {
+  bytes: number;
+  timestamp: number;
+  packetsLost: number;
+  packetsTotal: number;
+}
+
 export async function collectInboundStats(
   pc: RTCPeerConnection,
-  prevSnapshot: { bytes: number; timestamp: number } | null
-): Promise<{ stats: StreamStats; nextSnapshot: { bytes: number; timestamp: number } | null }> {
+  prevSnapshot: StatsSnapshot | null
+): Promise<{ stats: StreamStats; nextSnapshot: StatsSnapshot | null }> {
   const report = await pc.getStats();
   let width = 0;
   let height = 0;
   let fps = 0;
   let bytesReceived = 0;
+  let packetsLost = 0;
+  let packetsReceived = 0;
   let timestamp = 0;
   let rttMs: number | null = null;
 
@@ -648,6 +597,8 @@ export async function collectInboundStats(
       height = entry.frameHeight || height;
       fps = typeof entry.framesPerSecond === 'number' ? Math.round(entry.framesPerSecond) : fps;
       bytesReceived = entry.bytesReceived || 0;
+      packetsLost = entry.packetsLost || 0;
+      packetsReceived = entry.packetsReceived || 0;
       timestamp = entry.timestamp || 0;
     }
     if (
@@ -660,15 +611,150 @@ export async function collectInboundStats(
   });
 
   let bitrateKbps = 0;
+  let packetLossPct = 0;
+  const packetsTotal = packetsReceived + packetsLost;
+
   if (prevSnapshot && timestamp > prevSnapshot.timestamp && bytesReceived >= prevSnapshot.bytes) {
     const dtSec = (timestamp - prevSnapshot.timestamp) / 1000;
     if (dtSec > 0) {
       bitrateKbps = Math.round(((bytesReceived - prevSnapshot.bytes) * 8) / dtSec / 1000);
     }
+    const deltaTotal = packetsTotal - prevSnapshot.packetsTotal;
+    const deltaLost = Math.max(0, packetsLost - prevSnapshot.packetsLost);
+    if (deltaTotal > 0) {
+      packetLossPct = Number(((deltaLost / deltaTotal) * 100).toFixed(1));
+    }
   }
 
   return {
-    stats: { width, height, fps, bitrateKbps, rttMs },
-    nextSnapshot: timestamp ? { bytes: bytesReceived, timestamp } : prevSnapshot,
+    stats: {
+      width,
+      height,
+      fps,
+      bitrateKbps,
+      rttMs,
+      packetLossPct,
+      signalQuality: computeSignalQuality(rttMs, packetLossPct),
+    },
+    nextSnapshot: timestamp
+      ? { bytes: bytesReceived, timestamp, packetsLost, packetsTotal }
+      : prevSnapshot,
+  };
+}
+
+export async function collectOutboundStats(
+  pc: RTCPeerConnection,
+  prevSnapshot: StatsSnapshot | null
+): Promise<{ stats: StreamStats; nextSnapshot: StatsSnapshot | null }> {
+  const report = await pc.getStats();
+  let width = 0;
+  let height = 0;
+  let fps = 0;
+  let bytesSent = 0;
+  let packetsSent = 0;
+  let timestamp = 0;
+  let rttMs: number | null = null;
+  let packetsLost = 0;
+
+  report.forEach((entry) => {
+    if (entry.type === 'outbound-rtp' && entry.kind === 'video') {
+      width = entry.frameWidth || width;
+      height = entry.frameHeight || height;
+      fps = typeof entry.framesPerSecond === 'number' ? Math.round(entry.framesPerSecond) : fps;
+      bytesSent = entry.bytesSent || 0;
+      packetsSent = entry.packetsSent || 0;
+      timestamp = entry.timestamp || 0;
+    }
+    if (entry.type === 'remote-inbound-rtp' && entry.kind === 'video') {
+      if (typeof entry.packetsLost === 'number') {
+        packetsLost = entry.packetsLost;
+      }
+      if (typeof entry.roundTripTime === 'number') {
+        rttMs = Math.round(entry.roundTripTime * 1000);
+      }
+    }
+    if (
+      entry.type === 'candidate-pair' &&
+      entry.state === 'succeeded' &&
+      typeof entry.currentRoundTripTime === 'number' &&
+      rttMs === null
+    ) {
+      rttMs = Math.round(entry.currentRoundTripTime * 1000);
+    }
+  });
+
+  let bitrateKbps = 0;
+  let packetLossPct = 0;
+  if (prevSnapshot && timestamp > prevSnapshot.timestamp && bytesSent >= prevSnapshot.bytes) {
+    const dtSec = (timestamp - prevSnapshot.timestamp) / 1000;
+    if (dtSec > 0) {
+      bitrateKbps = Math.round(((bytesSent - prevSnapshot.bytes) * 8) / dtSec / 1000);
+    }
+    const deltaSent = packetsSent - prevSnapshot.packetsTotal;
+    const deltaLost = Math.max(0, packetsLost - prevSnapshot.packetsLost);
+    if (deltaSent > 0) {
+      packetLossPct = Number(((deltaLost / deltaSent) * 100).toFixed(1));
+    }
+  }
+
+  return {
+    stats: {
+      width,
+      height,
+      fps,
+      bitrateKbps,
+      rttMs,
+      packetLossPct,
+      signalQuality: computeSignalQuality(rttMs, packetLossPct),
+    },
+    nextSnapshot: timestamp
+      ? { bytes: bytesSent, timestamp, packetsLost, packetsTotal: packetsSent }
+      : prevSnapshot,
+  };
+}
+
+export function detectSmartphoneModel(): string {
+  const ua = navigator.userAgent || '';
+  if (/iPhone/i.test(ua)) return 'Apple iPhone';
+  if (/iPad/i.test(ua)) return 'Apple iPad';
+  const androidMatch = ua.match(/Android\s[\d.]+;\s([^;)]+)/i);
+  if (androidMatch && androidMatch[1]) {
+    return androidMatch[1].replace(/\s*Build\/.*$/i, '').trim().slice(0, 32);
+  }
+  if (/Android/i.test(ua)) return 'Android Smartphone';
+  return 'Mobile Camera';
+}
+
+export async function readBatteryTelemetry(): Promise<{
+  batteryPct: number | null;
+  charging: boolean | null;
+}> {
+  try {
+    const nav = navigator as Navigator & {
+      getBattery?: () => Promise<{ level: number; charging: boolean }>;
+    };
+    if (typeof nav.getBattery === 'function') {
+      const bat = await nav.getBattery();
+      return {
+        batteryPct: Math.round(bat.level * 100),
+        charging: Boolean(bat.charging),
+      };
+    }
+  } catch {
+    // Battery API unavailable (e.g. iOS Safari)
+  }
+  return { batteryPct: null, charging: null };
+}
+
+export function createInitialPhoneTelemetry(lensLabel: string, audioActive: boolean): PhoneTelemetry {
+  const model = detectSmartphoneModel();
+  return {
+    deviceName: model,
+    model,
+    lensLabel,
+    batteryPct: null,
+    charging: null,
+    thermalState: null,
+    audioActive,
   };
 }

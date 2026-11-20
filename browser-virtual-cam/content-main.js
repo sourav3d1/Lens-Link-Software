@@ -24,9 +24,9 @@
 
   const ISO_SOURCE = 'lenslink-ext-iso';
   const MAIN_SOURCE = 'lenslink-ext-main';
-  const VIRTUAL_DEVICE_ID = 'lenslink-wireless-camera';
+  const VIRTUAL_DEVICE_ID = 'lenslink-wireless-webcam';
   const VIRTUAL_GROUP_ID = 'lenslink-vcam-group';
-  const VIRTUAL_LABEL = 'LensLink Wireless Camera';
+  const VIRTUAL_LABEL = 'LensLink Wireless Webcam';
 
   const origEnumerateDevices = navigator.mediaDevices.enumerateDevices.bind(navigator.mediaDevices);
   const origGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
@@ -37,7 +37,7 @@
     pairCode: '',
   };
 
-  let statusText = 'Waiting for LensLink PC Receiver...';
+  let statusText = 'Waiting for LensLink Desktop Client...';
   let lastFrameAt = 0;
 
   // Shared offscreen canvas rendered into captureStream(30)
@@ -93,14 +93,14 @@
     ctx.fillStyle = '#0f172a';
     ctx.fillRect(0, 0, w, h);
 
-    ctx.strokeStyle = 'rgba(59, 130, 246, 0.35)';
+    ctx.strokeStyle = 'rgba(37, 99, 235, 0.55)';
     ctx.lineWidth = 3;
     ctx.strokeRect(32, 32, w - 64, h - 64);
 
     ctx.fillStyle = '#f8fafc';
     ctx.font = '600 32px system-ui, -apple-system, sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText('LensLink Wireless Camera', w / 2, h / 2 - 18);
+    ctx.fillText('LensLink Wireless Webcam', w / 2, h / 2 - 18);
 
     ctx.fillStyle = '#94a3b8';
     ctx.font = '400 20px system-ui, -apple-system, sans-serif';

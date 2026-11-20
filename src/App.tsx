@@ -1,70 +1,68 @@
 import { useEffect, useState } from 'react';
-import { PcReceiverView } from './components/pc/PcReceiverView';
-import { PhoneCameraView } from './components/phone/PhoneCameraView';
+import { AppMode } from './types/lenslink';
+import { LensLinkDesktopClient } from './components/windows/LensLinkDesktopClient';
+import { LensLinkMobileApp } from './components/mobile/LensLinkMobileApp';
 import { VirtualCamOutputView } from './components/vcam/VirtualCamOutputView';
 import { OfflineIndicator } from './components/common/PWAInstallButton';
 
-type AppMode = 'pc' | 'phone' | 'vcam';
-
-function getInitialRoute(): { mode: AppMode; pairCode: string } {
+function parseRouteState(): { mode: AppMode; initialRoomCode: string | null } {
   const params = new URLSearchParams(window.location.search);
   const path = window.location.pathname.toLowerCase();
-  const rawPair = (params.get('pair') || params.get('code') || '').toUpperCase().trim();
-  const pairCode = /^[A-Z0-9]{6}$/.test(rawPair) ? rawPair : '';
-  const modeParam = params.get('mode')?.toLowerCase();
+  const modeParam = (params.get('mode') || '').toLowerCase();
+  const rawCode = (params.get('code') || params.get('pair') || '').trim().toUpperCase();
+  const validCode = /^[A-Z0-9]{6}$/.test(rawCode) ? rawCode : null;
 
-  if (modeParam === 'vcam' || path === '/vcam') {
-    return { mode: 'vcam', pairCode };
-  }
-  if (modeParam === 'phone' || path === '/phone' || pairCode) {
-    return { mode: 'phone', pairCode };
-  }
-  if (modeParam === 'pc') {
-    return { mode: 'pc', pairCode: '' };
+  if (path === '/vcam' || modeParam === 'vcam') {
+    return { mode: 'vcam', initialRoomCode: validCode };
   }
 
-  // Default mobile browsers to Smartphone Camera view, desktop browsers to PC Receiver
-  const isMobileUa = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-  return {
-    mode: isMobileUa ? 'phone' : 'pc',
-    pairCode: '',
-  };
+  if (modeParam === 'pc' || modeParam === 'desktop') {
+    return { mode: 'desktop', initialRoomCode: validCode };
+  }
+
+  const isMobileUa = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || '');
+  if (path === '/phone' || modeParam === 'phone' || modeParam === 'mobile' || validCode || isMobileUa) {
+    return { mode: 'mobile', initialRoomCode: validCode };
+  }
+
+  return { mode: 'desktop', initialRoomCode: null };
 }
 
-export default function App() {
-  const initial = getInitialRoute();
-  const [mode, setMode] = useState<AppMode>(initial.mode);
-  const [pairCode, setPairCode] = useState<string>(initial.pairCode);
+export function App() {
+  const [route, setRoute] = useState<{ mode: AppMode; initialRoomCode: string | null }>(() =>
+    parseRouteState()
+  );
 
   useEffect(() => {
-    // Keep standalone mobile app URL clean at /phone for iOS Add to Home Screen & Android PWA
-    if (mode === 'phone' && window.location.pathname !== '/phone') {
-      window.history.replaceState({}, '', '/phone');
-    }
-  }, [mode]);
+    const onPopState = () => setRoute(parseRouteState());
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
+
+  if (route.mode === 'vcam') {
+    return <VirtualCamOutputView pairCode={route.initialRoomCode || ''} />;
+  }
+
+  if (route.mode === 'mobile') {
+    return (
+      <>
+        <LensLinkMobileApp
+          initialRoomCode={route.initialRoomCode}
+          onSwitchToDesktop={() => setRoute({ mode: 'desktop', initialRoomCode: null })}
+        />
+        <OfflineIndicator />
+      </>
+    );
+  }
 
   return (
     <>
-      {mode === 'vcam' ? (
-        <VirtualCamOutputView pairCode={pairCode} />
-      ) : mode === 'phone' ? (
-        <PhoneCameraView
-          initialPairCode={pairCode}
-          onSwitchToPc={() => {
-            setMode('pc');
-            window.history.replaceState({}, '', '/?mode=pc');
-          }}
-        />
-      ) : (
-        <PcReceiverView
-          onOpenPhoneMode={(code) => {
-            setPairCode(code);
-            setMode('phone');
-            window.history.replaceState({}, '', '/phone');
-          }}
-        />
-      )}
+      <LensLinkDesktopClient
+        onSwitchToMobile={() => setRoute({ mode: 'mobile', initialRoomCode: null })}
+      />
       <OfflineIndicator />
     </>
   );
 }
+
+export default App;

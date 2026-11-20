@@ -116,3 +116,5 @@ export async function downloadBundle(
     };
   }
 }
+
+export const triggerDirectFileDownload = downloadBundle;

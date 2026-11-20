@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDisplayName</key>
+    <string>LensLink Webcam</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.lenslink.wirelesswebcam</string>
+    <key>CFBundleShortVersionString</key>
+    <string>2.0.0</string>
+    <key>NSCameraUsageDescription</key>
+    <string>LensLink Wireless Webcam uses your iPhone camera to stream live low-latency video to your Windows PC over Wi-Fi.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Optional microphone access allows LensLink to transmit voice audio to your Windows PC.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>LensLink discovers your Windows PC automatically on the same local Wi-Fi network without manual IP entry.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_lenslink-webcam._tcp</string>
+    </array>
+    <key>UIRequiresFullScreen</key>
+    <true/>
+</dict>
+</plist>

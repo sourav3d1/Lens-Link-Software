@@ -23,8 +23,8 @@ export default defineConfig(() => {
           name: 'LensLink Wireless Webcam',
           short_name: 'LensLink',
           description:
-            'Turn Android or iPhone smartphones into wireless webcams for Windows PCs over local Wi-Fi with dynamic session QR pairing.',
-          theme_color: '#0F172A',
+            'Turn Android or iPhone smartphones into real-time wireless webcams for Windows PCs with automatic Wi-Fi discovery and virtual webcam driver.',
+          theme_color: '#1D4ED8',
           background_color: '#F8FAFC',
           display: 'standalone',
           start_url: '/',
@@ -91,14 +91,14 @@ export default defineConfig(() => {
           handler(html, ctx) {
             const url = ctx.originalUrl || '';
             const isPhoneUrl =
-              url.startsWith('/phone') || /[?&](mode=phone|pair=|code=)/i.test(url);
+              url.startsWith('/phone') || /[?&](mode=phone|mode=mobile|pair=|code=)/i.test(url);
             if (!isPhoneUrl) return html;
             return html
               .replace(/href="\/manifest\.webmanifest"/g, 'href="/phone-manifest.webmanifest"')
               .replace('content="LensLink"', 'content="LensLink Cam"')
               .replace(
                 '<title>LensLink — Wireless Smartphone Webcam</title>',
-                '<title>LensLink Cam — Wireless Phone Webcam</title>'
+                '<title>LensLink Cam — Mobile Wireless Webcam</title>'
               );
           },
         },

@@ -10,10 +10,11 @@ import {
 import { db, handleFirestoreError, OperationType } from './firebase';
 
 export type BundleId =
-  | 'browser-webcam'
   | 'windows-vcam'
-  | 'pc-windows'
-  | 'android-studio';
+  | 'android-studio'
+  | 'ios-app'
+  | 'browser-webcam'
+  | 'pc-windows';
 
 export interface BundleCatalogEntry {
   bundleId: BundleId;
@@ -27,40 +28,44 @@ export interface BundleCatalogEntry {
 
 export const BUNDLE_CATALOG: BundleCatalogEntry[] = [
   {
-    bundleId: 'browser-webcam',
-    title: 'Browser Virtual Webcam Extension',
-    description: 'Chrome & Edge extension (zero OBS, zero Python, zero drivers)',
-    filename: 'lenslink-browser-webcam.zip',
-    apiPath: '/api/browser-cam/bundle',
-    staticPath: '/downloads/lenslink-browser-webcam.zip',
-    version: '1.2.0',
-  },
-  {
     bundleId: 'windows-vcam',
-    title: 'Windows DirectShow Driver + Bridge',
-    description: 'Standalone Windows DirectShow virtual camera bridge (no OBS)',
-    filename: 'lenslink-windows-vcam.zip',
+    title: 'LensLink Windows Client & Virtual Webcam Driver',
+    description:
+      'System-level DirectShow virtual webcam driver (LensLink Wireless Webcam), mDNS auto-discovery client, Inno Setup installer & uninstaller',
+    filename: 'lenslink-windows-webcam-suite.zip',
     apiPath: '/api/virtual-cam/bundle',
-    staticPath: '/downloads/lenslink-windows-vcam.zip',
-    version: '1.0.0',
-  },
-  {
-    bundleId: 'pc-windows',
-    title: 'Windows PC Desktop Launcher',
-    description: 'Standalone Windows desktop shortcut installer & scripts',
-    filename: 'lenslink-pc-windows.zip',
-    apiPath: '/api/pc-app/bundle',
-    staticPath: '/downloads/lenslink-pc-windows.zip',
-    version: '1.0.0',
+    staticPath: '/downloads/lenslink-windows-webcam-suite.zip',
+    version: '2.0.0',
   },
   {
     bundleId: 'android-studio',
-    title: 'Native Android Mobile App (Kotlin)',
-    description: 'Android Studio project with Camera2, WebRTC & QR scanner',
-    filename: 'lenslink-android-studio.zip',
+    title: 'LensLink Mobile App — Android (Kotlin)',
+    description:
+      'Native Android app with Camera2 multi-lens, 4K/60fps, NSD auto-discovery, MediaCodec H.264, microphone & battery monitor',
+    filename: 'lenslink-android-app.zip',
     apiPath: '/api/android-app/bundle',
-    staticPath: '/downloads/lenslink-android-studio.zip',
-    version: '1.0.0',
+    staticPath: '/downloads/lenslink-android-app.zip',
+    version: '2.0.0',
+  },
+  {
+    bundleId: 'ios-app',
+    title: 'LensLink Mobile App — iOS (SwiftUI)',
+    description:
+      'Native iOS app with AVFoundation multi-lens, 4K/60fps, Bonjour auto-discovery, VideoToolbox H.264, microphone & thermal monitor',
+    filename: 'lenslink-ios-app.zip',
+    apiPath: '/api/ios-app/bundle',
+    staticPath: '/downloads/lenslink-ios-app.zip',
+    version: '2.0.0',
+  },
+  {
+    bundleId: 'browser-webcam',
+    title: 'LensLink Browser Virtual Webcam (Chrome / Edge)',
+    description:
+      'Zero-driver Chrome & Edge extension exposing LensLink Wireless Webcam directly in Google Meet, Zoom Web & Teams Web',
+    filename: 'lenslink-browser-webcam.zip',
+    apiPath: '/api/browser-cam/bundle',
+    staticPath: '/downloads/lenslink-browser-webcam.zip',
+    version: '2.0.0',
   },
 ];
 
@@ -119,14 +124,17 @@ export function inferBundleIdFromUrl(url: string): BundleId | undefined {
   if (url.includes('/api/browser-cam/bundle') || url.includes('lenslink-browser-webcam')) {
     return 'browser-webcam';
   }
-  if (url.includes('/api/virtual-cam/bundle') || url.includes('lenslink-windows-vcam')) {
+  if (url.includes('/api/virtual-cam/bundle') || url.includes('lenslink-windows-webcam-suite')) {
     return 'windows-vcam';
   }
-  if (url.includes('/api/pc-app/bundle') || url.includes('lenslink-pc-windows')) {
-    return 'pc-windows';
+  if (url.includes('/api/ios-app/bundle') || url.includes('lenslink-ios-app')) {
+    return 'ios-app';
   }
-  if (url.includes('/api/android-app/bundle') || url.includes('lenslink-android-studio')) {
+  if (url.includes('/api/android-app/bundle') || url.includes('lenslink-android-app')) {
     return 'android-studio';
+  }
+  if (url.includes('/api/pc-app/bundle')) {
+    return 'windows-vcam';
   }
   return undefined;
 }

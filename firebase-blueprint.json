@@ -2,7 +2,7 @@
   "entities": {
     "DownloadBundle": {
       "title": "DownloadBundle",
-      "description": "Pre-built downloadable LensLink ZIP bundle stored directly in Firebase Firestore for reliable zero-404 client downloads.",
+      "description": "Pre-built downloadable LensLink Wireless Webcam ZIP bundle stored directly in Firebase Firestore for reliable zero-404 client downloads.",
       "type": "object",
       "properties": {
         "bundleId": {
@@ -10,7 +10,7 @@
           "description": "Canonical bundle identifier matching document ID.",
           "minLength": 1,
           "maxLength": 64,
-          "pattern": "^(browser-webcam|windows-vcam|pc-windows|android-studio)$"
+          "pattern": "^(browser-webcam|windows-vcam|pc-windows|android-studio|ios-app)$"
         },
         "filename": {
           "type": "string",

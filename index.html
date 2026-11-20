@@ -4,15 +4,15 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
     <title>LensLink — Wireless Smartphone Webcam</title>
-    <meta name="description" content="Turn your Android or iPhone into a low-latency wireless webcam for your Windows PC over local Wi-Fi using QR pairing and WebRTC." />
+    <meta name="description" content="Turn your Android or iPhone into a real-time wireless webcam for Windows with automatic Wi-Fi discovery and system-level virtual webcam support." />
     <meta property="og:title" content="LensLink — Wireless Smartphone Webcam" />
-    <meta property="og:description" content="Turn your Android or iPhone into a low-latency wireless webcam for your Windows PC over local Wi-Fi using QR pairing and WebRTC." />
+    <meta property="og:description" content="Turn your Android or iPhone into a real-time wireless webcam for Windows with automatic Wi-Fi discovery and system-level virtual webcam support." />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="theme-color" content="#0F172A" />
+    <meta name="theme-color" content="#1D4ED8" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta name="apple-mobile-web-app-title" content="LensLink" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="icon" type="image/svg+xml" href="/icon.svg" />
@@ -20,7 +20,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
   </head>
-  <body class="antialiased selection:bg-blue-600 selection:text-white">
+  <body class="bg-[#F8FAFC] text-[#0F172A] antialiased selection:bg-[#1D4ED8] selection:text-white">
     <script>
       (function () {
         window.__lenslinkDeferredPrompt = null;
@@ -39,8 +39,8 @@
         var path = (window.location.pathname || '').toLowerCase();
         var isMobileUa = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || '');
         var isVcam = path === '/vcam' || /[?&]mode=vcam\b/i.test(search);
-        var isPc = /[?&]mode=pc\b/i.test(search);
-        var isMobile = !isVcam && !isPc && (path === '/phone' || /[?&](mode=phone|pair=|code=)/i.test(search) || isMobileUa);
+        var isPc = /[?&]mode=(pc|desktop)\b/i.test(search);
+        var isMobile = !isVcam && !isPc && (path === '/phone' || /[?&](mode=phone|mode=mobile|pair=|code=)/i.test(search) || isMobileUa);
         if (isMobile) {
           var manifestLink = document.querySelector('link[rel="manifest"]');
           if (manifestLink && manifestLink.getAttribute('href') !== '/phone-manifest.webmanifest') {
@@ -48,7 +48,7 @@
           }
           var appleTitle = document.querySelector('meta[name="apple-mobile-web-app-title"]');
           if (appleTitle) appleTitle.setAttribute('content', 'LensLink Cam');
-          document.title = 'LensLink Cam — Wireless Phone Webcam';
+          document.title = 'LensLink Cam — Mobile Wireless Webcam';
         }
       })();
     </script>

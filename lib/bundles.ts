@@ -79,34 +79,56 @@ export function buildZipBuffer(files: ZipFileEntry[]): Buffer {
   return Buffer.concat([...localParts, centralDir, eocd]);
 }
 
-const VCAM_FILES = [
-  'lenslink_vcam.py',
-  'requirements.txt',
-  'start_virtual_cam.bat',
-  'Install_Driver_No_OBS.bat',
-  'Uninstall_Driver.bat',
-  'README.md',
-];
-
-export function buildWindowsVcamZip(rootDir: string, wsOrigin: string): Buffer | null {
-  const vcamDir = path.join(rootDir, 'windows-virtual-cam');
+function walkDirectory(
+  baseDir: string,
+  zipPrefix: string,
+  transform?: (relPath: string, content: Buffer) => Buffer
+): ZipFileEntry[] {
+  if (!fs.existsSync(baseDir)) return [];
   const files: ZipFileEntry[] = [];
-
-  for (const fileName of VCAM_FILES) {
-    const fullPath = path.join(vcamDir, fileName);
-    if (!fs.existsSync(fullPath)) continue;
-    let content = fs.readFileSync(fullPath);
-    if (fileName === 'start_virtual_cam.bat' || fileName === 'lenslink_vcam.py') {
-      content = Buffer.from(
-        content.toString('utf8').replaceAll('ws://127.0.0.1:3000', wsOrigin),
-        'utf8'
-      );
+  const walk = (dirPath: string, relPrefix: string) => {
+    for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
+      const full = path.join(dirPath, entry.name);
+      const rel = relPrefix ? `${relPrefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        if (entry.name === '.gradle' || entry.name === 'build' || entry.name === '.idea') continue;
+        walk(full, rel);
+      } else if (entry.isFile()) {
+        const raw = fs.readFileSync(full);
+        files.push({
+          name: `${zipPrefix}/${rel}`,
+          content: transform ? transform(rel, raw) : raw,
+        });
+      }
     }
-    files.push({
-      name: `lenslink-windows-vcam/${fileName}`,
-      content,
-    });
-  }
+  };
+  walk(baseDir, '');
+  return files;
+}
+
+export function buildLensLinkWindowsSuiteZip(
+  rootDir: string,
+  appOrigin: string,
+  wsOrigin: string
+): Buffer | null {
+  const suiteDir = path.join(rootDir, 'windows-lenslink-suite');
+  const files = walkDirectory(suiteDir, 'LensLink-Wireless-Webcam-Windows', (rel, content) => {
+    if (
+      rel === 'Install_LensLink_Webcam.bat' ||
+      rel === 'Start_LensLink_Webcam.bat' ||
+      rel === 'client/lenslink_windows_client.py'
+    ) {
+      const text = content
+        .toString('utf8')
+        .replaceAll('ws://127.0.0.1:3000', wsOrigin)
+        .replaceAll(
+          'https://ais-dev-uezvraxz5h2xsf4xr5nkjk-789221242334.asia-southeast1.run.app',
+          appOrigin
+        );
+      return Buffer.from(text, 'utf8');
+    }
+    return content;
+  });
 
   return files.length > 0 ? buildZipBuffer(files) : null;
 }
@@ -151,124 +173,23 @@ export function buildBrowserCamZip(rootDir: string, appOrigin: string): Buffer |
   return files.length > 0 ? buildZipBuffer(files) : null;
 }
 
-export function buildPcWindowsZip(rootDir: string, appOrigin: string): Buffer {
-  const launchUrl = `${appOrigin}/?mode=pc`;
-
-  const launchBat = [
-    '@echo off',
-    'setlocal',
-    `set "APP_URL=${launchUrl}"`,
-    'echo Launching LensLink PC Receiver...',
-    'where msedge >nul 2>nul && (start "" msedge --app="%APP_URL%" --new-window && exit /b 0)',
-    'if exist "%ProgramFiles(x86)%\\Microsoft\\Edge\\Application\\msedge.exe" (start "" "%ProgramFiles(x86)%\\Microsoft\\Edge\\Application\\msedge.exe" --app="%APP_URL%" --new-window && exit /b 0)',
-    'if exist "%ProgramFiles%\\Microsoft\\Edge\\Application\\msedge.exe" (start "" "%ProgramFiles%\\Microsoft\\Edge\\Application\\msedge.exe" --app="%APP_URL%" --new-window && exit /b 0)',
-    'if exist "%ProgramFiles%\\Google\\Chrome\\Application\\chrome.exe" (start "" "%ProgramFiles%\\Google\\Chrome\\Application\\chrome.exe" --app="%APP_URL%" --new-window && exit /b 0)',
-    'if exist "%ProgramFiles(x86)%\\Google\\Chrome\\Application\\chrome.exe" (start "" "%ProgramFiles(x86)%\\Google\\Chrome\\Application\\chrome.exe" --app="%APP_URL%" --new-window && exit /b 0)',
-    'start "" "%APP_URL%"',
-    'exit /b 0',
-    '',
-  ].join('\r\n');
-
-  const installBat = [
-    '@echo off',
-    'setlocal',
-    `set "APP_URL=${launchUrl}"`,
-    'echo ==================================================',
-    'echo   LensLink PC Desktop Installer (Windows 10 / 11)',
-    'echo ==================================================',
-    'echo.',
-    'set "BROWSER_EXE="',
-    'if exist "%ProgramFiles(x86)%\\Microsoft\\Edge\\Application\\msedge.exe" set "BROWSER_EXE=%ProgramFiles(x86)%\\Microsoft\\Edge\\Application\\msedge.exe"',
-    'if not defined BROWSER_EXE if exist "%ProgramFiles%\\Microsoft\\Edge\\Application\\msedge.exe" set "BROWSER_EXE=%ProgramFiles%\\Microsoft\\Edge\\Application\\msedge.exe"',
-    'if not defined BROWSER_EXE if exist "%ProgramFiles%\\Google\\Chrome\\Application\\chrome.exe" set "BROWSER_EXE=%ProgramFiles%\\Google\\Chrome\\Application\\chrome.exe"',
-    'if not defined BROWSER_EXE if exist "%ProgramFiles(x86)%\\Google\\Chrome\\Application\\chrome.exe" set "BROWSER_EXE=%ProgramFiles(x86)%\\Google\\Chrome\\Application\\chrome.exe"',
-    'if not defined BROWSER_EXE (',
-    '  echo Microsoft Edge or Google Chrome not found in default paths.',
-    '  echo Opening in your default browser instead...',
-    '  start "" "%APP_URL%"',
-    '  pause',
-    '  exit /b 0',
-    ')',
-    'echo Creating Desktop and Start Menu shortcuts for LensLink...',
-    'powershell -NoProfile -ExecutionPolicy Bypass -Command "$ws = New-Object -ComObject WScript.Shell; $desktop = [Environment]::GetFolderPath(\'Desktop\'); $startMenu = Join-Path ([Environment]::GetFolderPath(\'Programs\')) \'LensLink.lnk\'; foreach ($path in @((Join-Path $desktop \'LensLink.lnk\'), $startMenu)) { $s = $ws.CreateShortcut($path); $s.TargetPath = \'%BROWSER_EXE%\'; $s.Arguments = \'--app=%APP_URL% --new-window\'; $s.Description = \'LensLink Wireless Smartphone Webcam\'; $s.Save() }"',
-    'echo.',
-    'echo Shortcut installed! Launching LensLink PC Receiver...',
-    'start "" "%BROWSER_EXE%" --app="%APP_URL%" --new-window',
-    'exit /b 0',
-    '',
-  ].join('\r\n');
-
-  const readmeTxt = [
-    'LensLink PC Desktop Application (Windows 10 / 11)',
-    '==================================================',
-    '',
-    '1. Install Desktop Shortcut:',
-    '   Double-click Install_LensLink_Desktop.bat to add a LensLink icon',
-    '   to your Windows Desktop and Start Menu and launch it as a standalone app.',
-    '',
-    '2. Portable Quick Launch:',
-    '   Double-click Launch_LensLink.bat anytime to open a fresh session window.',
-    '',
-    '3. Multi-PC & Multi-Smartphone on the Same Wi-Fi:',
-    '   Each time LensLink opens on any PC, it generates a unique dynamic QR code',
-    "   and 6-character session code. Scan each PC's QR code with its paired",
-    '   smartphone so multiple workstations operate independently on the same Wi-Fi.',
-    '',
-    '4. Windows Virtual Webcam (No OBS Studio Required):',
-    '   Open the included virtual-cam folder and run Install_Driver_No_OBS.bat',
-    '   followed by start_virtual_cam.bat to expose a native DirectShow webcam.',
-    '',
-  ].join('\r\n');
-
-  const files: ZipFileEntry[] = [
-    { name: 'LensLink-PC/Install_LensLink_Desktop.bat', content: Buffer.from(installBat, 'utf8') },
-    { name: 'LensLink-PC/Launch_LensLink.bat', content: Buffer.from(launchBat, 'utf8') },
-    { name: 'LensLink-PC/README.txt', content: Buffer.from(readmeTxt, 'utf8') },
-  ];
-
-  const vcamDir = path.join(rootDir, 'windows-virtual-cam');
-  for (const fileName of VCAM_FILES) {
-    const fullPath = path.join(vcamDir, fileName);
-    if (fs.existsSync(fullPath)) {
-      files.push({
-        name: `LensLink-PC/virtual-cam/${fileName}`,
-        content: fs.readFileSync(fullPath),
-      });
-    }
-  }
-
-  return buildZipBuffer(files);
-}
-
 export function buildAndroidStudioZip(rootDir: string, appOrigin: string): Buffer | null {
   const androidDir = path.join(rootDir, 'android-app');
-  if (!fs.existsSync(androidDir)) return null;
-
-  const files: ZipFileEntry[] = [];
-  const walk = (dirPath: string, relPrefix: string) => {
-    for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
-      const full = path.join(dirPath, entry.name);
-      const rel = relPrefix ? `${relPrefix}/${entry.name}` : entry.name;
-      if (entry.isDirectory()) {
-        if (entry.name === '.gradle' || entry.name === 'build' || entry.name === '.idea') continue;
-        walk(full, rel);
-      } else if (entry.isFile()) {
-        let content = fs.readFileSync(full);
-        if (rel === 'app/src/main/res/values/strings.xml') {
-          const xmlEscapedOrigin = appOrigin.replace(/&/g, '&amp;');
-          content = Buffer.from(
-            content.toString('utf8').replace('http://192.168.1.100:3000', xmlEscapedOrigin),
-            'utf8'
-          );
-        }
-        files.push({
-          name: `LensLink-Android/${rel}`,
-          content,
-        });
-      }
+  const files = walkDirectory(androidDir, 'LensLink-Android', (rel, content) => {
+    if (rel === 'app/src/main/res/values/strings.xml') {
+      const xmlEscapedOrigin = appOrigin.replace(/&/g, '&amp;');
+      return Buffer.from(
+        content.toString('utf8').replace('http://192.168.1.100:3000', xmlEscapedOrigin),
+        'utf8'
+      );
     }
-  };
+    return content;
+  });
+  return files.length > 0 ? buildZipBuffer(files) : null;
+}
 
-  walk(androidDir, '');
+export function buildIosAppZip(rootDir: string): Buffer | null {
+  const iosDir = path.join(rootDir, 'ios-app');
+  const files = walkDirectory(iosDir, 'LensLink-iOS');
   return files.length > 0 ? buildZipBuffer(files) : null;
 }

@@ -17,8 +17,15 @@ import {
   CameraCapabilities,
   CameraSettings,
   DEFAULT_CAMERA_SETTINGS,
-  SignalingMessage,
 } from '../../types/lenslink';
+
+interface RoomStatusMsg {
+  type: string;
+  capabilities?: CameraCapabilities;
+  settings?: Partial<CameraSettings>;
+  pcOnline?: boolean;
+  phoneOnline?: boolean;
+}
 
 interface VirtualCamOutputViewProps {
   pairCode: string;
@@ -352,7 +359,7 @@ export function VirtualCamOutputView({ pairCode }: VirtualCamOutputViewProps) {
       }
 
       try {
-        const msg = JSON.parse(event.data) as SignalingMessage;
+        const msg = JSON.parse(event.data) as RoomStatusMsg;
         if (msg.type === 'room:status') {
           if (msg.capabilities) setCapabilities(msg.capabilities);
           if (msg.settings) setSettings((prev) => ({ ...prev, ...msg.settings }));

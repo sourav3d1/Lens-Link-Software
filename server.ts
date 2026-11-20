@@ -10,8 +10,8 @@ import { WebSocket, WebSocketServer } from 'ws';
 import {
   buildAndroidStudioZip,
   buildBrowserCamZip,
-  buildPcWindowsZip,
-  buildWindowsVcamZip,
+  buildIosAppZip,
+  buildLensLinkWindowsSuiteZip,
 } from './lib/bundles.ts';
 
 dotenv.config();
@@ -37,12 +37,14 @@ interface RoomState {
   code: string;
   sessionToken: string | null;
   pcName: string;
+  platform: string;
   pc: SocketMeta | null;
   phone: SocketMeta | null;
   vcamBridges: Set<SocketMeta>;
   vcamWebClients: Map<string, SocketMeta>;
   capabilities: unknown | null;
   settings: Record<string, unknown> | null;
+  telemetry: Record<string, unknown> | null;
   phoneName: string | null;
   createdAt: number;
   lastActivity: number;
@@ -50,6 +52,7 @@ interface RoomState {
 
 const rooms = new Map<string, RoomState>();
 const socketMetaMap = new WeakMap<WebSocket, SocketMeta>();
+const discoverySubscribers = new Set<WebSocket>();
 
 function generatePairingCode(): string {
   for (let attempt = 0; attempt < 50; attempt++) {
@@ -67,13 +70,15 @@ function createEmptyRoom(code: string): RoomState {
   return {
     code,
     sessionToken: null,
-    pcName: 'PC Workstation',
+    pcName: 'Windows PC',
+    platform: 'Windows Desktop',
     pc: null,
     phone: null,
     vcamBridges: new Set<SocketMeta>(),
     vcamWebClients: new Map<string, SocketMeta>(),
     capabilities: null,
     settings: null,
+    telemetry: null,
     phoneName: null,
     createdAt: now,
     lastActivity: now,
@@ -83,35 +88,6 @@ function createEmptyRoom(code: string): RoomState {
 function sendJson(ws: WebSocket | null | undefined, payload: Record<string, unknown>) {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(payload));
-  }
-}
-
-function broadcastRoomStatus(room: RoomState) {
-  const vcamWebFrameCount = Array.from(room.vcamWebClients.values()).filter(
-    (c) => c.wantsFrames
-  ).length;
-  const statusPayload: Record<string, unknown> = {
-    type: 'room:status',
-    code: room.code,
-    pcOnline: Boolean(room.pc && room.pc.ws.readyState === WebSocket.OPEN),
-    phoneOnline: Boolean(room.phone && room.phone.ws.readyState === WebSocket.OPEN),
-    vcamBridgeCount: room.vcamBridges.size,
-    vcamWebCount: room.vcamWebClients.size,
-    vcamWebFrameCount,
-    vcamWebPeerIds: Array.from(room.vcamWebClients.keys()),
-    phoneName: room.phoneName || undefined,
-    pcName: room.pcName,
-    capabilities: room.capabilities,
-    settings: room.settings,
-  };
-
-  sendJson(room.pc?.ws, statusPayload);
-  sendJson(room.phone?.ws, statusPayload);
-  for (const bridge of room.vcamBridges) {
-    sendJson(bridge.ws, statusPayload);
-  }
-  for (const webClient of room.vcamWebClients.values()) {
-    sendJson(webClient.ws, statusPayload);
   }
 }
 
@@ -138,7 +114,12 @@ function getLanIps(): string[] {
       else if (entry.address.startsWith('10.')) score += 20;
       else if (entry.address.startsWith('172.')) score += 10;
 
-      if (lowerName.includes('wi-fi') || lowerName.includes('wlan') || lowerName.includes('eth') || lowerName.includes('en0')) {
+      if (
+        lowerName.includes('wi-fi') ||
+        lowerName.includes('wlan') ||
+        lowerName.includes('eth') ||
+        lowerName.includes('en0')
+      ) {
         score += 15;
       }
       if (isVirtualAdapter) score -= 25;
@@ -151,12 +132,93 @@ function getLanIps(): string[] {
   return candidates.map((c) => c.ip);
 }
 
+function getDiscoveredPcs() {
+  const lanIp = getLanIps()[0] || 'Local Wi-Fi';
+  const list: Array<{
+    roomCode: string;
+    pcName: string;
+    platform: string;
+    lanHint: string;
+    phoneConnected: boolean;
+    lastSeenMs: number;
+  }> = [];
+
+  for (const room of rooms.values()) {
+    const pcOnline = Boolean(room.pc && room.pc.ws.readyState === WebSocket.OPEN);
+    if (!pcOnline) continue;
+    list.push({
+      roomCode: room.code,
+      pcName: room.pcName,
+      platform: room.platform,
+      lanHint: lanIp,
+      phoneConnected: Boolean(room.phone && room.phone.ws.readyState === WebSocket.OPEN),
+      lastSeenMs: room.lastActivity,
+    });
+  }
+
+  list.sort((a, b) => b.lastSeenMs - a.lastSeenMs);
+  return list;
+}
+
+function broadcastDiscoveredPcs() {
+  if (discoverySubscribers.size === 0) return;
+  const payload = {
+    type: 'discovery:pcs',
+    pcs: getDiscoveredPcs(),
+  };
+  for (const subscriber of discoverySubscribers) {
+    if (subscriber.readyState === WebSocket.OPEN) {
+      subscriber.send(JSON.stringify(payload));
+    } else {
+      discoverySubscribers.delete(subscriber);
+    }
+  }
+}
+
+function broadcastRoomStatus(room: RoomState) {
+  const vcamWebFrameCount = Array.from(room.vcamWebClients.values()).filter(
+    (c) => c.wantsFrames
+  ).length;
+  const statusPayload: Record<string, unknown> = {
+    type: 'room:status',
+    code: room.code,
+    pcOnline: Boolean(room.pc && room.pc.ws.readyState === WebSocket.OPEN),
+    phoneOnline: Boolean(room.phone && room.phone.ws.readyState === WebSocket.OPEN),
+    vcamBridgeCount: room.vcamBridges.size,
+    vcamWebCount: room.vcamWebClients.size,
+    vcamWebFrameCount,
+    vcamWebPeerIds: Array.from(room.vcamWebClients.keys()),
+    phoneName: room.phoneName || undefined,
+    pcName: room.pcName,
+    capabilities: room.capabilities,
+    settings: room.settings,
+    telemetry: room.telemetry,
+  };
+
+  sendJson(room.pc?.ws, statusPayload);
+  sendJson(room.phone?.ws, statusPayload);
+  for (const bridge of room.vcamBridges) {
+    sendJson(bridge.ws, statusPayload);
+  }
+  for (const webClient of room.vcamWebClients.values()) {
+    sendJson(webClient.ws, statusPayload);
+  }
+
+  broadcastDiscoveredPcs();
+}
+
 async function startServer() {
   const app = express();
   app.use(express.json());
 
   app.get('/api/health', (_req, res) => {
-    res.json({ ok: true, activeRooms: rooms.size });
+    res.json({ ok: true, activeRooms: rooms.size, discoveredPcs: getDiscoveredPcs().length });
+  });
+
+  // Zero-config local-network PC auto-discovery endpoint
+  app.get('/api/discover', (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ pcs: getDiscoveredPcs() });
   });
 
   app.get('/phone-manifest.webmanifest', (_req, res) => {
@@ -164,16 +226,16 @@ async function startServer() {
     res.setHeader('Cache-Control', 'no-cache');
     res.json({
       id: '/phone',
-      name: 'LensLink Camera',
+      name: 'LensLink Wireless Webcam',
       short_name: 'LensLink Cam',
       description:
-        'Turn your Android or iPhone into a low-latency wireless webcam for your Windows PC.',
+        'Turn your smartphone into a real-time wireless webcam for your Windows PC.',
       start_url: '/phone',
       scope: '/',
       display: 'standalone',
       orientation: 'portrait',
-      background_color: '#020617',
-      theme_color: '#020617',
+      background_color: '#FFFFFF',
+      theme_color: '#1D4ED8',
       icons: [
         {
           src: '/pwa-192x192.png',
@@ -205,21 +267,18 @@ async function startServer() {
       hostHeader === 'localhost' || hostHeader === '127.0.0.1' || hostHeader === '::1';
     const proto = req.headers['x-forwarded-proto'] === 'https' || req.secure ? 'https' : 'http';
 
-    let suggestedOrigin = `${proto}://${req.headers.host || `localhost:${PORT}`}`;
+    let preferredOrigin = `${proto}://${req.headers.host || `localhost:${PORT}`}`;
     if (isLocalhostRequest && preferredIp) {
-      suggestedOrigin = `http://${preferredIp}:${PORT}`;
+      preferredOrigin = `http://${preferredIp}:${PORT}`;
     }
-
-    const envAppUrl = (process.env.APP_URL || '').trim();
-    const httpsOrigin = /^https:\/\/[^/]+/i.test(envAppUrl) ? envAppUrl.replace(/\/+$/, '') : null;
 
     res.json({
       lanIps,
       preferredIp,
       port: PORT,
-      isLocalhostRequest,
-      suggestedOrigin,
-      httpsOrigin,
+      hostname: os.hostname(),
+      preferredOrigin,
+      wsPath: '/ws',
     });
   });
 
@@ -233,7 +292,7 @@ async function startServer() {
       const svg = await QRCode.toString(text, {
         type: 'svg',
         margin: 1,
-        width: 240,
+        width: 220,
         errorCorrectionLevel: 'M',
         color: {
           dark: '#0F172A',
@@ -266,31 +325,28 @@ async function startServer() {
     res.send(zipBuffer);
   };
 
-  app.get('/api/virtual-cam/bundle', (req, res) => {
+  const handleWindowsSuite = (req: express.Request, res: express.Response) => {
     const appOrigin = resolveRequestAppOrigin(req);
     const wsOrigin = appOrigin.replace(/^https:\/\//i, 'wss://').replace(/^http:\/\//i, 'ws://');
-    const zipBuffer = buildWindowsVcamZip(__dirname, wsOrigin);
+    const zipBuffer = buildLensLinkWindowsSuiteZip(__dirname, appOrigin, wsOrigin);
     if (!zipBuffer) {
-      res.status(404).json({ error: 'Virtual camera bridge files not found' });
+      res.status(404).json({ error: 'Windows virtual webcam suite files not found' });
       return;
     }
-    sendZipResponse(res, 'lenslink-windows-vcam.zip', zipBuffer);
-  });
+    sendZipResponse(res, 'lenslink-windows-webcam-suite.zip', zipBuffer);
+  };
+
+  app.get('/api/virtual-cam/bundle', handleWindowsSuite);
+  app.get('/api/pc-app/bundle', handleWindowsSuite);
 
   app.get('/api/browser-cam/bundle', (req, res) => {
     const appOrigin = resolveRequestAppOrigin(req);
     const zipBuffer = buildBrowserCamZip(__dirname, appOrigin);
     if (!zipBuffer) {
-      res.status(404).json({ error: 'Browser virtual camera extension files not found' });
+      res.status(404).json({ error: 'Browser virtual webcam extension files not found' });
       return;
     }
     sendZipResponse(res, 'lenslink-browser-webcam.zip', zipBuffer);
-  });
-
-  app.get('/api/pc-app/bundle', (req, res) => {
-    const appOrigin = resolveRequestAppOrigin(req);
-    const zipBuffer = buildPcWindowsZip(__dirname, appOrigin);
-    sendZipResponse(res, 'lenslink-pc-windows.zip', zipBuffer);
   });
 
   app.get('/api/android-app/bundle', (req, res) => {
@@ -300,7 +356,16 @@ async function startServer() {
       res.status(404).json({ error: 'Android app project files not found' });
       return;
     }
-    sendZipResponse(res, 'lenslink-android-studio.zip', zipBuffer);
+    sendZipResponse(res, 'lenslink-android-app.zip', zipBuffer);
+  });
+
+  app.get('/api/ios-app/bundle', (_req, res) => {
+    const zipBuffer = buildIosAppZip(__dirname);
+    if (!zipBuffer) {
+      res.status(404).json({ error: 'iOS app project files not found' });
+      return;
+    }
+    sendZipResponse(res, 'lenslink-ios-app.zip', zipBuffer);
   });
 
   const server = http.createServer(app);
@@ -332,7 +397,7 @@ async function startServer() {
       } else {
         sendJson(ws, {
           type: 'room:error',
-          message: `Pairing code "${code}" was not found. Make sure the LensLink PC Receiver is open.`,
+          message: `Windows PC session "${code}" was not found. Make sure LensLink Desktop is open on your PC.`,
         });
         return;
       }
@@ -387,7 +452,10 @@ async function startServer() {
     });
 
     if (
-      (queryRole === 'vcam' || queryRole === 'vcam-web' || queryRole === 'pc' || queryRole === 'phone') &&
+      (queryRole === 'vcam' ||
+        queryRole === 'vcam-web' ||
+        queryRole === 'pc' ||
+        queryRole === 'phone') &&
       queryCode
     ) {
       attachClientToRoom(ws, queryRole, queryCode);
@@ -396,7 +464,6 @@ async function startServer() {
     ws.on('message', (rawData, isBinary) => {
       const senderMeta = socketMetaMap.get(ws);
 
-      // Binary frames from PC receiver are relayed to Windows Virtual Camera bridges and OBS Browser fallback clients
       if (isBinary) {
         if (!senderMeta || senderMeta.role !== 'pc') return;
         const room = rooms.get(senderMeta.code);
@@ -434,6 +501,12 @@ async function startServer() {
         return;
       }
 
+      if (type === 'discovery:subscribe') {
+        discoverySubscribers.add(ws);
+        sendJson(ws, { type: 'discovery:pcs', pcs: getDiscoveredPcs() });
+        return;
+      }
+
       if (type === 'room:create') {
         const incomingSessionToken =
           typeof msg.sessionToken === 'string' && msg.sessionToken.trim().length > 0
@@ -442,7 +515,11 @@ async function startServer() {
         const incomingPcName =
           typeof msg.pcName === 'string' && msg.pcName.trim().length > 0
             ? msg.pcName.trim().slice(0, 40)
-            : 'PC Workstation';
+            : 'Windows PC';
+        const incomingPlatform =
+          typeof msg.platform === 'string' && msg.platform.trim().length > 0
+            ? msg.platform.trim().slice(0, 40)
+            : 'Windows Desktop';
 
         let targetCode =
           typeof msg.code === 'string' && /^[A-Z0-9]{6}$/i.test(msg.code.trim())
@@ -450,7 +527,6 @@ async function startServer() {
             : generatePairingCode();
 
         let room = rooms.get(targetCode);
-        // If another active PC session already owns this code, allocate a distinct code to avoid cross-PC collision
         if (
           room &&
           room.pc &&
@@ -471,6 +547,7 @@ async function startServer() {
           room.sessionToken = incomingSessionToken;
         }
         room.pcName = incomingPcName;
+        room.platform = incomingPlatform;
 
         attachClientToRoom(ws, 'pc', targetCode);
         sendJson(ws, {
@@ -482,11 +559,19 @@ async function startServer() {
         return;
       }
 
-      if (type === 'room:join') {
-        const code = typeof msg.code === 'string' ? msg.code : '';
+      if (type === 'room:join' || type === 'join') {
+        const code =
+          typeof msg.code === 'string'
+            ? msg.code
+            : typeof msg.room === 'string'
+              ? msg.room
+              : '';
         const role = msg.role;
         const phoneName = typeof msg.phoneName === 'string' ? msg.phoneName : undefined;
-        if (!code || (role !== 'pc' && role !== 'phone' && role !== 'vcam' && role !== 'vcam-web')) {
+        if (
+          !code ||
+          (role !== 'pc' && role !== 'phone' && role !== 'vcam' && role !== 'vcam-web')
+        ) {
           sendJson(ws, { type: 'room:error', message: 'Invalid room join request.' });
           return;
         }
@@ -512,6 +597,18 @@ async function startServer() {
         return;
       }
 
+      if (type === 'camera:telemetry') {
+        room.telemetry =
+          msg.telemetry && typeof msg.telemetry === 'object'
+            ? (msg.telemetry as Record<string, unknown>)
+            : null;
+        sendJson(room.pc?.ws, {
+          type: 'camera:telemetry',
+          telemetry: room.telemetry,
+        });
+        return;
+      }
+
       if (type === 'camera:settings') {
         const incoming =
           msg.settings && typeof msg.settings === 'object'
@@ -524,7 +621,6 @@ async function startServer() {
           settings: incoming,
           from: senderMeta.role,
         });
-        // Forward visual settings to chromeless vcam-web outputs so OBS mirrors PC controls
         for (const webClient of room.vcamWebClients.values()) {
           sendJson(webClient.ws, {
             type: 'camera:settings',
@@ -568,25 +664,12 @@ async function startServer() {
         return;
       }
 
-      if (type === 'camera:request-capture') {
-        sendJson(room.phone?.ws, {
-          type: 'camera:request-capture',
-          captureCategory: msg.captureCategory,
-          from: senderMeta.role,
-        });
-        return;
-      }
-
-      if (type === 'camera:photo-captured') {
-        sendJson(room.pc?.ws, {
-          type: 'camera:photo-captured',
-          photo: msg.photo,
-          from: senderMeta.role,
-        });
-        return;
-      }
-
-      if (type === 'rtc:offer' || type === 'rtc:answer' || type === 'rtc:ice-candidate' || type === 'rtc:restart') {
+      if (
+        type === 'rtc:offer' ||
+        type === 'rtc:answer' ||
+        type === 'rtc:ice-candidate' ||
+        type === 'rtc:restart'
+      ) {
         const targetRole = msg.target;
         const targetPeerId = typeof msg.peerId === 'string' ? msg.peerId : undefined;
 
@@ -604,7 +687,6 @@ async function startServer() {
         } else if (targetRole === 'pc') {
           sendJson(room.pc?.ws, outbound);
         } else {
-          // Default peer-to-peer routing between pc <-> phone
           const targetWs = senderMeta.role === 'pc' ? room.phone?.ws : room.pc?.ws;
           sendJson(targetWs, outbound);
         }
@@ -612,6 +694,7 @@ async function startServer() {
     });
 
     ws.on('close', () => {
+      discoverySubscribers.delete(ws);
       const meta = socketMetaMap.get(ws);
       if (!meta) return;
       const room = rooms.get(meta.code);
@@ -631,7 +714,6 @@ async function startServer() {
     });
   });
 
-  // Periodic WebSocket heartbeat & stale room cleanup
   const heartbeatInterval = setInterval(() => {
     for (const ws of wss.clients) {
       const meta = socketMetaMap.get(ws);
@@ -684,17 +766,14 @@ async function startServer() {
       const isPhoneReq =
         reqPath === '/phone' ||
         req.query.mode === 'phone' ||
+        req.query.mode === 'mobile' ||
         Boolean(req.query.pair) ||
         Boolean(req.query.code);
       if (isPhoneReq && fs.existsSync(indexHtmlPath)) {
         const html = fs
           .readFileSync(indexHtmlPath, 'utf8')
           .replace('href="/manifest.webmanifest"', 'href="/phone-manifest.webmanifest"')
-          .replace('content="LensLink"', 'content="LensLink Cam"')
-          .replace(
-            '<title>LensLink — Wireless Smartphone Webcam</title>',
-            '<title>LensLink Cam — Wireless Phone Webcam</title>'
-          );
+          .replace('content="LensLink"', 'content="LensLink Cam"');
         res.setHeader('Content-Type', 'text/html; charset=utf-8');
         res.send(html);
         return;
@@ -705,9 +784,9 @@ async function startServer() {
 
   server.listen(PORT, '0.0.0.0', () => {
     const lanIps = getLanIps();
-    console.log(`LensLink server listening on http://0.0.0.0:${PORT}`);
+    console.log(`LensLink Wireless Webcam server listening on http://0.0.0.0:${PORT}`);
     if (lanIps.length > 0) {
-      console.log(`Local Wi-Fi URL for smartphone pairing: http://${lanIps[0]}:${PORT}`);
+      console.log(`Local Wi-Fi discovery URL: http://${lanIps[0]}:${PORT}`);
     }
   });
 }

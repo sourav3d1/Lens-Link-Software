@@ -4,8 +4,8 @@ import { fileURLToPath } from 'node:url';
 import {
   buildAndroidStudioZip,
   buildBrowserCamZip,
-  buildPcWindowsZip,
-  buildWindowsVcamZip,
+  buildIosAppZip,
+  buildLensLinkWindowsSuiteZip,
 } from '../lib/bundles.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -25,22 +25,24 @@ const defaultWsOrigin = defaultOrigin
 
 fs.mkdirSync(outDir, { recursive: true });
 
+const winSuiteZip = buildLensLinkWindowsSuiteZip(rootDir, defaultOrigin, defaultWsOrigin);
+if (winSuiteZip) {
+  fs.writeFileSync(path.join(outDir, 'lenslink-windows-webcam-suite.zip'), winSuiteZip);
+}
+
+const androidZip = buildAndroidStudioZip(rootDir, defaultOrigin);
+if (androidZip) {
+  fs.writeFileSync(path.join(outDir, 'lenslink-android-app.zip'), androidZip);
+}
+
+const iosZip = buildIosAppZip(rootDir);
+if (iosZip) {
+  fs.writeFileSync(path.join(outDir, 'lenslink-ios-app.zip'), iosZip);
+}
+
 const browserZip = buildBrowserCamZip(rootDir, defaultOrigin);
 if (browserZip) {
   fs.writeFileSync(path.join(outDir, 'lenslink-browser-webcam.zip'), browserZip);
 }
 
-const vcamZip = buildWindowsVcamZip(rootDir, defaultWsOrigin);
-if (vcamZip) {
-  fs.writeFileSync(path.join(outDir, 'lenslink-windows-vcam.zip'), vcamZip);
-}
-
-const pcZip = buildPcWindowsZip(rootDir, defaultOrigin);
-fs.writeFileSync(path.join(outDir, 'lenslink-pc-windows.zip'), pcZip);
-
-const androidZip = buildAndroidStudioZip(rootDir, defaultOrigin);
-if (androidZip) {
-  fs.writeFileSync(path.join(outDir, 'lenslink-android-studio.zip'), androidZip);
-}
-
-console.log(`Generated static bundles in ${outDir}`);
+console.log(`Generated LensLink Wireless Webcam static bundles in ${outDir}`);
